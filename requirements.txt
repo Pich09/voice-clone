@@ -12,7 +12,7 @@ pydantic>=2.7
 python-multipart==0.0.9
 tqdm>=4.66
 jsonlines==4.0.0
-khmernltk==1.6
+khmer-nltk==1.6
 regex>=2024.5.15
 requests>=2.31
 
