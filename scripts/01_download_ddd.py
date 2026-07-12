@@ -9,15 +9,48 @@ Usage:
         --split train \
         --out_dir data/raw/ddd
 
-Requires: `datasets`, `soundfile`, and a HuggingFace account/token if the
-dataset is gated (set HF_TOKEN env var, or run `huggingface-cli login`).
+Requires: `datasets`, `huggingface_hub`, `soundfile`, and a HuggingFace
+account/token if the dataset is gated (set HF_TOKEN env var, or run
+`huggingface-cli login`).
 """
 import argparse
-import itertools
+import json
 import os
 
 import soundfile as sf
-from datasets import load_dataset
+
+
+def list_shard_files(dataset: str, split: str) -> list[str]:
+    """Repo files that make up `split`, in a stable order.
+
+    Some HF dataset repos accumulate multiple overlapping shard-numbering
+    generations over time (e.g. train-00000-of-00653.parquet alongside a
+    newer train-00653-of-00724.parquet run) -- all of them can match the
+    dataset's own "data/train-*" config glob. Letting `datasets` resolve
+    and interleave/prefetch across all of them is what caused far more
+    parquet downloads than --max_samples should need. Listing + sorting
+    ourselves gives full control over exactly which files get touched.
+    """
+    from huggingface_hub import HfApi
+
+    api = HfApi(token=os.environ.get("HF_TOKEN"))
+    files = api.list_repo_files(dataset, repo_type="dataset")
+    prefix = f"data/{split}-"
+    shards = sorted(f for f in files if f.startswith(prefix) and f.endswith(".parquet"))
+    return shards
+
+
+def rows_from_shard(dataset: str, shard_file: str, split: str):
+    """Download one shard file and yield its rows (small, bounded download)."""
+    from huggingface_hub import hf_hub_download
+    from datasets import load_dataset
+
+    local_path = hf_hub_download(
+        repo_id=dataset, repo_type="dataset", filename=shard_file,
+        token=os.environ.get("HF_TOKEN"),
+    )
+    shard_ds = load_dataset("parquet", data_files={split: local_path}, split=split)
+    yield from shard_ds
 
 
 def main():
@@ -34,46 +67,69 @@ def main():
     manifest_path = os.path.join("data", "manifests", "ddd_raw.jsonl")
     os.makedirs(os.path.dirname(manifest_path), exist_ok=True)
 
-    print(f"Loading {args.dataset} [{args.split}] ...")
-    # Stream instead of materializing the whole split to disk first -- with a
-    # non-streaming load, --max_samples only truncated the *exported* audio;
-    # the full dataset (all shards) still landed in the HF datasets cache.
-    ds = load_dataset(args.dataset, split=args.split, streaming=True)
+    n_written = 0
+
+    def export_row(i, row, manifest_f):
+        nonlocal n_written
+        audio = row.get("audio")
+        text = row.get("transcript") or row.get("text") or ""
+        speaker_id = row.get("speaker_id") or row.get("speaker") or "unknown"
+
+        if audio is None or not text.strip():
+            return
+
+        array = audio["array"]
+        sr = audio["sampling_rate"]
+        fname = f"{speaker_id}_{i:07d}.wav"
+        out_path = os.path.join(audio_dir, fname)
+        sf.write(out_path, array, sr)
+
+        duration = len(array) / sr
+        record = {
+            "audio_path": out_path,
+            "text": text.strip(),
+            "speaker_id": speaker_id,
+            "duration": round(duration, 3),
+            "source": args.dataset,
+        }
+        manifest_f.write(json.dumps(record, ensure_ascii=False) + "\n")
+        n_written += 1
+        if n_written % 500 == 0:
+            print(f"  ... {n_written} samples exported")
 
     if args.max_samples:
-        ds = itertools.islice(ds, args.max_samples)
+        # Bounded case: fetch shard files one at a time, stop the moment we
+        # have enough -- never touches more of the dataset than necessary.
+        print(f"Listing shard files for {args.dataset} [{args.split}] ...")
+        shard_files = list_shard_files(args.dataset, args.split)
+        if not shard_files:
+            raise SystemExit(
+                f"No shard files found matching data/{args.split}-*.parquet "
+                f"in {args.dataset} -- check the dataset's actual file layout."
+            )
+        print(f"{len(shard_files)} shard file(s) available; pulling only as many as needed "
+              f"for {args.max_samples} samples.")
 
-    n_written = 0
-    with open(manifest_path, "a", encoding="utf-8") as manifest_f:
-        for i, row in enumerate(ds):
-            # Field names vary across DDD releases -- adjust these keys to
-            # match the actual dataset schema (check ds.features first).
-            audio = row.get("audio")
-            text = row.get("transcript") or row.get("text") or ""
-            speaker_id = row.get("speaker_id") or row.get("speaker") or "unknown"
-
-            if audio is None or not text.strip():
-                continue
-
-            array = audio["array"]
-            sr = audio["sampling_rate"]
-            fname = f"{speaker_id}_{i:07d}.wav"
-            out_path = os.path.join(audio_dir, fname)
-            sf.write(out_path, array, sr)
-
-            duration = len(array) / sr
-            record = {
-                "audio_path": out_path,
-                "text": text.strip(),
-                "speaker_id": speaker_id,
-                "duration": round(duration, 3),
-                "source": args.dataset,
-            }
-            manifest_f.write(__import__("json").dumps(record, ensure_ascii=False) + "\n")
-            n_written += 1
-
-            if n_written % 500 == 0:
-                print(f"  ... {n_written} samples exported")
+        i = 0
+        with open(manifest_path, "a", encoding="utf-8") as manifest_f:
+            for shard_file in shard_files:
+                if n_written >= args.max_samples:
+                    break
+                print(f"  fetching {shard_file} ...")
+                for row in rows_from_shard(args.dataset, shard_file, args.split):
+                    if n_written >= args.max_samples:
+                        break
+                    export_row(i, row, manifest_f)
+                    i += 1
+    else:
+        # Unlimited: a real full run genuinely needs the whole split, so let
+        # `datasets` stream it end to end.
+        from datasets import load_dataset
+        print(f"Loading full {args.dataset} [{args.split}] (streaming) ...")
+        ds = load_dataset(args.dataset, split=args.split, streaming=True)
+        with open(manifest_path, "a", encoding="utf-8") as manifest_f:
+            for i, row in enumerate(ds):
+                export_row(i, row, manifest_f)
 
     print(f"Done. Wrote {n_written} records to {manifest_path}")
 
