@@ -1,0 +1,23 @@
+ffmpeg-python==0.2.0
+librosa==0.10.2
+torchaudio>=2.2
+soundfile==0.12.1
+pyloudnorm==0.1.1
+numpy>=1.24
+pandas>=2.0
+datasets>=2.19
+fastapi==0.111.0
+uvicorn[standard]==0.30.1
+pydantic>=2.7
+python-multipart==0.0.9
+tqdm>=4.66
+jsonlines==4.0.0
+khmernltk==1.6
+regex>=2024.5.15
+requests>=2.31
+
+# Optional / heavier deps — install separately if you use them
+# torch>=2.2 (match your CUDA version, install from pytorch.org)
+# silero-vad (pip install silero-vad, or use torch.hub)
+# deepfilternet (pip install deepfilternet)
+# fish-speech (git clone into vendor/fish-speech and follow its own setup)

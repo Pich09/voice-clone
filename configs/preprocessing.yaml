@@ -1,0 +1,43 @@
+# Audio preprocessing configuration (Section 6)
+
+audio_qc:
+  min_duration_sec: 0.5
+  max_duration_sec: 20.0
+  max_clipping_ratio: 0.01
+  min_sample_rate: 16000
+  max_silence_ratio: 0.6
+  grade_a:
+    min_sample_rate: 22050
+    max_clipping_ratio: 0.0
+    max_silence_ratio: 0.2
+    rms_db_range: [-30, -12]
+  grade_b:
+    max_silence_ratio: 0.4
+    min_rms_db: -35
+  first_training_subset: ["A", "B"]
+
+denoise:
+  tool: deepfilternet
+  apply_to_grades: ["B"]
+  skip_grades: ["A"]   # never denoise already-clean audio
+  reject_grades: ["C", "D"]
+
+vad:
+  tool: silero_vad
+  min_speech_ratio: 0.4
+  keep_internal_pauses: true
+
+loudness:
+  target_lufs: -20.0
+  lufs_range: [-23, -18]
+  true_peak_db: -1.5
+  loudness_range_lra: 11
+  output_format:
+    sample_rate: 24000
+    channels: 1
+    bit_depth: 16
+
+splits:
+  valid_frac: 0.02
+  test_frac: 0.02
+  seed: 42

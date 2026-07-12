@@ -1,0 +1,29 @@
+# Khmer base model training configuration (Section 9.1)
+# Consumed by scripts/10_train_fish_khmer_base.sh
+
+project: khmer_base
+base_checkpoint: checkpoints/openaudio-s1-mini
+dataset_dir: data/fish/khmer_base
+proto_dir: data/fish/khmer_base_protos
+output_dir: models/khmer_base
+
+lora:
+  rank: 32
+  alpha: 64
+
+training:
+  max_steps: 20000
+  val_check_interval: 1000
+  learning_rate: 1.0e-4
+  batch_size: 16
+  warmup_steps: 500
+  precision: bf16
+
+data_targets:
+  prototype_hours: [20, 50]
+  good_v1_hours: [100, 200]
+  better_hours: 300
+
+notes: |
+  Purpose: teach the TTS model Khmer pronunciation and rhythm.
+  Use A-grade + selected B-grade audio only for this stage (Section 6.2).
