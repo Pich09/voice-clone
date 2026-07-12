@@ -11,6 +11,7 @@ in addition to any LoRA speaker adaptation).
 
 import os
 import subprocess
+import sys
 import time
 
 import soundfile as sf
@@ -45,7 +46,7 @@ class FishSpeechBackend(TTSBackend):
         ref_audio = self._reference_audio_for(speaker)
 
         cmd = [
-            "python", os.path.join(self.fish_speech_dir, "tools", "run_inference.py"),
+            sys.executable, os.path.join(self.fish_speech_dir, "tools", "run_inference.py"),
             "--checkpoint-path", self.model_dir,
             "--text", text,
             "--output", output_path,
