@@ -13,6 +13,7 @@ Requires: `datasets`, `soundfile`, and a HuggingFace account/token if the
 dataset is gated (set HF_TOKEN env var, or run `huggingface-cli login`).
 """
 import argparse
+import itertools
 import os
 
 import soundfile as sf
@@ -34,10 +35,13 @@ def main():
     os.makedirs(os.path.dirname(manifest_path), exist_ok=True)
 
     print(f"Loading {args.dataset} [{args.split}] ...")
-    ds = load_dataset(args.dataset, split=args.split, streaming=False)
+    # Stream instead of materializing the whole split to disk first -- with a
+    # non-streaming load, --max_samples only truncated the *exported* audio;
+    # the full dataset (all shards) still landed in the HF datasets cache.
+    ds = load_dataset(args.dataset, split=args.split, streaming=True)
 
     if args.max_samples:
-        ds = ds.select(range(min(args.max_samples, len(ds))))
+        ds = itertools.islice(ds, args.max_samples)
 
     n_written = 0
     with open(manifest_path, "a", encoding="utf-8") as manifest_f:
