@@ -43,13 +43,19 @@ def list_shard_files(dataset: str, split: str) -> list[str]:
 def rows_from_shard(dataset: str, shard_file: str, split: str):
     """Download one shard file and yield its rows (small, bounded download)."""
     from huggingface_hub import hf_hub_download
-    from datasets import load_dataset
+    from datasets import Audio, load_dataset
 
     local_path = hf_hub_download(
         repo_id=dataset, repo_type="dataset", filename=shard_file,
         token=os.environ.get("HF_TOKEN"),
     )
     shard_ds = load_dataset("parquet", data_files={split: local_path}, split=split)
+    # Keep audio as raw bytes rather than letting `datasets` auto-decode --
+    # recent `datasets` versions require the extra `torchcodec` dependency for
+    # that, which we don't otherwise need. We decode with `soundfile` (already
+    # a required dep) in export_row() instead.
+    if "audio" in shard_ds.features:
+        shard_ds = shard_ds.cast_column("audio", Audio(decode=False))
     yield from shard_ds
 
 
@@ -84,8 +90,17 @@ def main():
         if audio is None or not text.strip():
             return
 
-        array = audio["array"]
-        sr = audio["sampling_rate"]
+        # audio is either already-decoded {"array", "sampling_rate"} (streaming
+        # fallback path) or raw {"bytes"/"path"} (shard path, decode=False) --
+        # handle both.
+        if "array" in audio:
+            array, sr = audio["array"], audio["sampling_rate"]
+        else:
+            import io
+            data = audio.get("bytes")
+            source = io.BytesIO(data) if data else audio["path"]
+            array, sr = sf.read(source)
+
         fname = f"{speaker_id}_{i:07d}.wav"
         out_path = os.path.join(audio_dir, fname)
         sf.write(out_path, array, sr)
@@ -139,9 +154,11 @@ def main():
     else:
         # Unlimited: a real full run genuinely needs the whole split, so let
         # `datasets` stream it end to end.
-        from datasets import load_dataset
+        from datasets import Audio, load_dataset
         print(f"Loading full {args.dataset} [{args.split}] (streaming) ...")
         ds = load_dataset(args.dataset, split=args.split, streaming=True)
+        if "audio" in ds.features:
+            ds = ds.cast_column("audio", Audio(decode=False))
         with open(manifest_path, "a", encoding="utf-8") as manifest_f:
             for i, row in enumerate(ds):
                 export_row(i, row, manifest_f)
