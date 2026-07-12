@@ -1,20 +1,25 @@
 .venv/
+.venv*/
 __pycache__/
 *.pyc
 .env
 
 data/raw/**/*.wav
 data/processed/**/*.wav
-data/fish/**/*.wav
 data/manifests/*.jsonl
 !data/manifests/.gitkeep
 
-checkpoints/**/*.ckpt
-checkpoints/**/*.pth
-checkpoints/**/*.safetensors
-models/**/*.ckpt
-models/**/*.pth
-models/**/*.safetensors
+# Generated Fish Speech training data (speaker-folder wav/lab pairs + built
+# protobuf shards) -- always regenerable from scripts/09/10, never commit.
+data/fish/*/*
+
+checkpoints/*/*
+!checkpoints/*/.gitkeep
+models/*/*
+!models/*/.gitkeep
+
+# Lightning/tensorboard training output (hydra.run.dir / results dir)
+results/
 
 outputs/api/*.wav
 outputs/eval/**/*.wav

@@ -1,6 +1,6 @@
 # Project Checkpoint — Khmer TTS & Voice Cloning
 
-_Last updated: 2026-07-07_
+_Last updated: 2026-07-12_
 
 Handoff notes so work can resume without re-deriving context.
 
@@ -30,10 +30,11 @@ Handoff notes so work can resume without re-deriving context.
    - Stage 1 (learn Khmer) = full or **high-rank LoRA (r=32–64)**.
    - Stage 2 (learn my voice) = **freeze backbone + low-rank LoRA (r=8)** to avoid
      forgetting Khmer.
-   - ✅ `scripts/10_train_fish_khmer_base.sh` bumped to r=32/alpha=64 for Stage 1
-     (2026-07-12). Unverified against actual Fish Speech LoRA presets — confirm
-     `r_32_alpha_64` exists under `vendor/fish-speech/` config once cloned; fall back
-     to whatever preset name Fish Speech ships if it doesn't.
+   - ✅ `scripts/10_train_fish_khmer_base.sh` uses `r_32_alpha_16_fast` for Stage 1
+     (2026-07-12) — **verified against the real preset**, by actually running training
+     locally. The earlier `r_32_alpha_64` guess doesn't exist in fish-speech's repo;
+     real options are `r_8_alpha_16` and `r_32_alpha_16_fast` (see
+     `vendor/fish-speech/fish_speech/configs/lora/`).
 4. **Evaluation is the weak link.** Add objective, automatable metrics to
    `scripts/13_generate_eval_samples.py`: **SECS** (speaker-similarity cosine) and
    **Khmer CER** using the ASR model in the sibling `d:\Khmer-ASR` repo. Not done yet.
@@ -66,25 +67,55 @@ val_loss (falls back to highest step).
 
 ## Verified vs. NOT verified
 
-- ✅ **Local smoke test: 13/13 passed.** Data pipeline 02–09 + text normalization +
-  splits + Fish-format conversion + relay logic all work. `silero-vad` IS installed
-  locally; `ffmpeg` is NOT (step 06 skipped locally — Kaggle has it).
-- ❌ **Not yet run on Kaggle/GPU:** Fish install, Stage 1/2 training, inference.
+- ✅ **Full pipeline verified end-to-end on real hardware (2026-07-12, local RTX 3050
+  4GB, WSL2)**, not just a data-only smoke test: download (bounded, shard-by-shard) →
+  QC → denoise → VAD → normalize → text-normalize → split → Fish-format convert → real
+  **VQ token extraction on GPU** → protobuf dataset build → real **LoRA training steps**
+  (actual loss recorded) → real **inference → wav file out**. 50 DDD samples, 5 training
+  steps (smoke scale, not a real fine-tune — see below).
+- Fixed several real bugs found only by actually running this, not by reading code:
+  - `01_download_ddd.py`: `datasets>=5` needs `torchcodec` to auto-decode audio;
+    switched to manual `soundfile` decoding instead (avoids the extra dependency).
+  - `10_train_fish_khmer_base.sh`: wrong LoRA preset name, wrong `--checkpoint-path`
+    default in the VQ step, wrong Hydra config keys (`ckpt_path` → `pretrained_ckpt_path`,
+    `data.train_dataset.proto_files` → `train_dataset.proto_files`).
+  - **Real upstream fish-speech bug**: `FishTokenizer` passes a raw `tokenizer.tiktoken`
+    *file* to `transformers.AutoTokenizer.from_pretrained()`, which has always required
+    a *directory*. `fishaudio/openaudio-s1-mini` never published a `tokenizer_config.json`,
+    so this fails on every transformers version (tried 4.44.2, 4.56.1 — fish-speech's own
+    `uv.lock` pin —, and 4.57.3, identical failure each time). Worked around with
+    `scripts/patch_fish_speech_tokenizer.py`, which loads the vocab directly via
+    `tiktoken` instead. Wired into the notebook (runs right after cloning
+    `vendor/fish-speech`) and into `scripts/10` directly, so it's automatic everywhere.
+  - `transformers` unpinned resolves to a 5.x major that breaks fish-speech's tokenizer
+    code differently; `protobuf` needs to be >=3.20 (for the `builder` module fish-speech's
+    generated `_pb2.py` needs) and <7 (wandb's cap). Pinned `transformers==4.56.1` +
+    `protobuf==4.25.5` in the notebook's deps cell.
+  - Installing `vendor/fish-speech` with its full declared deps (`pip install -e .`)
+    sends pip's resolver into 40+ minutes of backtracking (its `pyproject.toml` hard-pins
+    `torch==2.8.0`/`datasets==2.18.0`/etc, conflicting with what's already installed).
+    Fixed by installing `--no-deps` and adding the actual runtime deps explicitly.
+- ❌ **Not yet run on Kaggle** specifically (Colab and local both verified this session).
 - ❌ **Not yet run live:** HF relay round-trip (publish → pull → registry).
-- ⚠️ **Highest risk:** Fish Speech CLI flag drift in `scripts/10` & `scripts/12`
-  (their `tools/*` paths/flags change between versions).
+- ⚠️ Real Khmer fine-tuning quality is unverified — 5 steps on 50 samples teaches nothing;
+  the mechanics are proven, actual pronunciation needs a real run (thousands of steps,
+  full/larger dataset) on Colab, where 4GB-VRAM limits and WSL2's slow GPU/host memory
+  paging (observed locally: ~4 min/step) don't apply.
 
 ## Next steps (priority order)
 
-1. **Minimal first Kaggle run:** `MAX_SAMPLES=200`, `ENABLE_RELAY=False`, tiny
-   `STAGE1_STEPS` — just confirm Fish installs and the training command runs. Paste any
-   error back to reconcile flags.
-2. Verify `khmer-speech-dataset` column names (schema) on Kaggle.
+1. **Run the real Stage 1 fine-tune on Colab**: raise `MAX_SAMPLES` and `STAGE1_STEPS`
+   toward real targets (~20000 steps) now that the whole pipeline is proven correct.
+2. Verify `khmer-speech-dataset` column names (schema) hasn't drifted.
 3. Wire objective eval metrics (SECS + Khmer CER from `d:\Khmer-ASR`) into `scripts/13`.
-4. Fix Stage-1 LoRA capacity (r=32–64 or full) in `scripts/10`.
-5. Promote F5-TTS backend from stub to working.
-6. (Optional) Add a `TARGET_HOURS` knob (hour-based subsetting) + a smoke-mode cell in
-   the notebook; live-test the relay round-trip against a scratch HF repo.
+4. Promote F5-TTS backend from stub to working.
+5. Fix `khmer_tts/inference/fish_backend.py` — it shells out to
+   `vendor/fish-speech/tools/run_inference.py`, which doesn't exist in the current
+   fish-speech repo (real inference goes through `fish_speech.inference_engine
+   .TTSInferenceEngine`, see `scripts/14_run_local_inference_smoketest.py` for a working
+   example). Not fixed yet — out of scope this session (app-serving layer, not training).
+6. (Optional) Add a `TARGET_HOURS` knob (hour-based subsetting) + live-test the relay
+   round-trip against a scratch HF repo.
 
 ## Reference papers reviewed (for ideas)
 

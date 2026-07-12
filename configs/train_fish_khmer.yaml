@@ -8,8 +8,10 @@ proto_dir: data/fish/khmer_base_protos
 output_dir: models/khmer_base
 
 lora:
+  # Matches vendor/fish-speech's actual r_32_alpha_16_fast preset (verified by
+  # running training locally -- r_32_alpha_64 doesn't exist in the real repo).
   rank: 32
-  alpha: 64
+  alpha: 16
 
 training:
   max_steps: 20000

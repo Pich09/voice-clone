@@ -1,9 +1,17 @@
 #!/usr/bin/env bash
 # Fine-tune Fish Speech on the Khmer base dataset (Section 9.1).
 #
-# Prerequisites:
+# Prerequisites (see kaggle/khmer_tts_kaggle.ipynb section 3 for the exact,
+# tested version of this flow -- fish-speech's own pyproject.toml pins
+# conflict with this repo's deps and cause pip's resolver to hang for 40+
+# minutes if installed naively):
 #   git clone https://github.com/fishaudio/fish-speech vendor/fish-speech
-#   cd vendor/fish-speech && pip install -e .
+#   pip install --no-deps -e vendor/fish-speech
+#   pip install hydra-core loguru natsort einops rich lightning tensorboard \
+#     loralib pyrootutils resampy "einx[torch]" zstandard pydub ormsgpack \
+#     tiktoken cachetools safetensors grpcio kui opencc-python-reimplemented \
+#     modelscope descript-audio-codec gradio wandb silero-vad \
+#     "transformers==4.56.1" "protobuf==4.25.5"
 #   Download base checkpoint (e.g. openaudio-s1-mini) into checkpoints/
 #
 # This follows Fish Speech's own documented flow:
@@ -31,12 +39,19 @@ fi
 
 mkdir -p "$PROTO_DIR" "$OUTPUT_DIR"
 
+# Patch a real upstream bug: FishTokenizer passes the raw tokenizer.tiktoken
+# *file* to transformers.AutoTokenizer.from_pretrained(), which has always
+# required a *directory* -- confirmed against fishaudio/openaudio-s1-mini's
+# actual published files (no tokenizer_config.json ships there). Idempotent.
+python scripts/patch_fish_speech_tokenizer.py --fish-dir "$FISH_DIR"
+
 echo "== Step 1: VQ token extraction =="
 python "$FISH_DIR/tools/vqgan/extract_vq.py" \
   "$DATASET_DIR" \
   --num-workers 4 \
   --batch-size 16 \
-  --config-name "modded_dac_vq"
+  --config-name "modded_dac_vq" \
+  --checkpoint-path "$CHECKPOINT_DIR/codec.pth"
 
 echo "== Step 2: Build protobuf dataset =="
 python "$FISH_DIR/tools/llama/build_dataset.py" \
@@ -49,10 +64,10 @@ echo "== Step 3: LoRA fine-tune Khmer base model =="
 python "$FISH_DIR/fish_speech/train.py" \
   --config-name text2semantic_finetune \
   project=khmer_base \
-  +lora@model.model.lora_config=r_32_alpha_64 \
-  data.train_dataset.proto_files="[\"$PROTO_DIR\"]" \
-  data.val_dataset.proto_files="[\"$PROTO_DIR\"]" \
-  ckpt_path="$CHECKPOINT_DIR" \
+  +lora@model.model.lora_config=r_32_alpha_16_fast \
+  train_dataset.proto_files="[$PROTO_DIR]" \
+  val_dataset.proto_files="[$PROTO_DIR]" \
+  pretrained_ckpt_path="$CHECKPOINT_DIR" \
   trainer.max_steps=20000 \
   trainer.val_check_interval=1000 \
   hydra.run.dir="$OUTPUT_DIR"
