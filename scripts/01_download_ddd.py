@@ -60,6 +60,12 @@ def main():
     parser.add_argument("--out_dir", default="data/raw/ddd")
     parser.add_argument("--max_samples", type=int, default=None,
                          help="Optional cap for quick smoke tests")
+    parser.add_argument("--max_shard_files", type=int, default=100,
+                         help="Hard cap on how many parquet shard files may be "
+                              "downloaded in the bounded (--max_samples) case, "
+                              "even if that means fewer than --max_samples rows "
+                              "get exported (e.g. many shards have empty/short "
+                              "rows filtered out). Set to 0 to disable.")
     args = parser.parse_args()
 
     audio_dir = os.path.join(args.out_dir, "audio")
@@ -107,20 +113,29 @@ def main():
                 f"No shard files found matching data/{args.split}-*.parquet "
                 f"in {args.dataset} -- check the dataset's actual file layout."
             )
+        if args.max_shard_files:
+            shard_files = shard_files[: args.max_shard_files]
         print(f"{len(shard_files)} shard file(s) available; pulling only as many as needed "
-              f"for {args.max_samples} samples.")
+              f"for {args.max_samples} samples "
+              f"(hard cap: {args.max_shard_files or 'none'} shard files).")
 
         i = 0
+        shards_fetched = 0
         with open(manifest_path, "a", encoding="utf-8") as manifest_f:
             for shard_file in shard_files:
                 if n_written >= args.max_samples:
                     break
                 print(f"  fetching {shard_file} ...")
+                shards_fetched += 1
                 for row in rows_from_shard(args.dataset, shard_file, args.split):
                     if n_written >= args.max_samples:
                         break
                     export_row(i, row, manifest_f)
                     i += 1
+
+        if n_written < args.max_samples and args.max_shard_files:
+            print(f"  (stopped after hitting the {args.max_shard_files}-shard-file cap, "
+                  f"only {n_written} samples collected -- raise --max_shard_files to get more)")
     else:
         # Unlimited: a real full run genuinely needs the whole split, so let
         # `datasets` stream it end to end.
