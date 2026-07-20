@@ -40,15 +40,41 @@ def list_shard_files(dataset: str, split: str) -> list[str]:
     return shards
 
 
+def _hf_hub_download_with_retry(dataset: str, shard_file: str, attempts: int = 5):
+    """hf_hub_download over HF's Xet CDN occasionally 403s with a signature
+    error ("invalid key pair id") -- usually a transient failure on HF's
+    storage backend (a stale/rotated signing key on their edge), not a
+    permissions problem despite the error text. Retrying after a short wait
+    clears most occurrences. Occasionally it's NOT transient -- the same
+    content-hash keeps failing across every retry with a fresh signed URL
+    each time, meaning that specific stored blob has a broken signing config
+    server-side. Callers should treat a raised exception here as "this file
+    is currently unavailable" rather than assume one more retry will help.
+    """
+    import time
+    from huggingface_hub import hf_hub_download
+
+    last_exc = None
+    for attempt in range(attempts):
+        try:
+            return hf_hub_download(
+                repo_id=dataset, repo_type="dataset", filename=shard_file,
+                token=os.environ.get("HF_TOKEN"),
+            )
+        except Exception as e:
+            last_exc = e
+            wait = 5 * (attempt + 1)
+            print(f"    hf_hub_download({shard_file}) attempt {attempt + 1}/{attempts} "
+                  f"failed ({e!r}), retrying in {wait}s...")
+            time.sleep(wait)
+    raise last_exc
+
+
 def rows_from_shard(dataset: str, shard_file: str, split: str):
     """Download one shard file and yield its rows (small, bounded download)."""
-    from huggingface_hub import hf_hub_download
     from datasets import Audio, load_dataset
 
-    local_path = hf_hub_download(
-        repo_id=dataset, repo_type="dataset", filename=shard_file,
-        token=os.environ.get("HF_TOKEN"),
-    )
+    local_path = _hf_hub_download_with_retry(dataset, shard_file)
     shard_ds = load_dataset("parquet", data_files={split: local_path}, split=split)
     # Keep audio as raw bytes rather than letting `datasets` auto-decode --
     # recent `datasets` versions require the extra `torchcodec` dependency for
@@ -136,17 +162,31 @@ def main():
 
         i = 0
         shards_fetched = 0
+        shards_skipped = 0
         with open(manifest_path, "a", encoding="utf-8") as manifest_f:
             for shard_file in shard_files:
                 if n_written >= args.max_samples:
                     break
                 print(f"  fetching {shard_file} ...")
                 shards_fetched += 1
-                for row in rows_from_shard(args.dataset, shard_file, args.split):
-                    if n_written >= args.max_samples:
-                        break
-                    export_row(i, row, manifest_f)
-                    i += 1
+                try:
+                    for row in rows_from_shard(args.dataset, shard_file, args.split):
+                        if n_written >= args.max_samples:
+                            break
+                        export_row(i, row, manifest_f)
+                        i += 1
+                except Exception as e:
+                    # A single shard can be permanently unavailable (a broken
+                    # signing config on one specific HF Xet CDN blob, seen in
+                    # practice -- retries inside rows_from_shard already ruled
+                    # out a transient blip). With many shards to pick from and
+                    # only --max_samples needed, skip this one and keep going
+                    # instead of aborting the whole download over one file.
+                    shards_skipped += 1
+                    print(f"  SKIPPING {shard_file} -- unavailable after retries ({e!r})")
+                    continue
+        if shards_skipped:
+            print(f"Skipped {shards_skipped}/{len(shard_files)} unavailable shard file(s).")
 
         if n_written < args.max_samples and args.max_shard_files:
             print(f"  (stopped after hitting the {args.max_shard_files}-shard-file cap, "

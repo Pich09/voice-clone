@@ -72,5 +72,25 @@ python "$FISH_DIR/fish_speech/train.py" \
   trainer.val_check_interval=1000 \
   hydra.run.dir="$OUTPUT_DIR"
 
+echo "== Step 4: Merge LoRA weights into a usable inference checkpoint =="
+# train.py's ModelCheckpoint callback writes LoRA-only weights under
+# results/<project>/checkpoints/ (paths.run_dir in fish-speech's base.yaml --
+# NOT $OUTPUT_DIR/hydra.run.dir, which only holds hydra's own config/log
+# clutter). ModelManager/TTSInferenceEngine can't load a LoRA delta directly,
+# so merge it onto the base weights first (tools/llama/merge_lora.py).
+LATEST_CKPT=$(ls -t "results/khmer_base/checkpoints"/*.ckpt 2>/dev/null | head -1)
+if [ -z "$LATEST_CKPT" ]; then
+  echo "ERROR: no LoRA checkpoint found under results/khmer_base/checkpoints/"
+  echo "(training may not have reached callbacks.model_checkpoint.every_n_train_steps yet)."
+  exit 1
+fi
+echo "Merging $LATEST_CKPT"
+python "$FISH_DIR/tools/llama/merge_lora.py" \
+  --lora-config r_32_alpha_16_fast \
+  --base-weight "$CHECKPOINT_DIR" \
+  --lora-weight "$LATEST_CKPT" \
+  --output "$OUTPUT_DIR/merged"
+
 echo "Done. Khmer base checkpoint saved under $OUTPUT_DIR"
+echo "Ready-for-inference merged checkpoint: $OUTPUT_DIR/merged"
 echo "Next: scripts/13_generate_eval_samples.py to sanity check pronunciation."

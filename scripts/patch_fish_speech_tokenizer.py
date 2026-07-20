@@ -133,7 +133,7 @@ class _TiktokenFileBackend:
     def save_pretrained(self, path):
         import shutil
 
-        os.makedirs(path, exist_ok=True)
+        _os.makedirs(path, exist_ok=True)
         shutil.copy(
             _os.path.join(self._model_dir, "tokenizer.tiktoken"),
             _os.path.join(path, "tokenizer.tiktoken"),
