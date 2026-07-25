@@ -31,6 +31,18 @@ CHECKPOINT_DIR="checkpoints/openaudio-s1-mini"
 OUTPUT_DIR="models/khmer_base"
 CONFIG="configs/train_fish_khmer.yaml"
 
+# Overridable via environment (used by kaggle/khmer_tts_kaggle.ipynb so the
+# notebook never has to sed this file in place -- in-place edits dirty the
+# git tree and break the notebook's own `git pull` on a persisted WORKDIR):
+#   STAGE1_MAX_STEPS  training steps (default 20000)
+#   PRETRAINED_CKPT   dir with model.pth/config.json/tokenizer to fine-tune
+#                     FROM (default: the base checkpoint). The HF relay sets
+#                     this to a pulled merged checkpoint to resume across
+#                     sessions. codec.pth always comes from CHECKPOINT_DIR --
+#                     the codec is frozen and merged checkpoints don't ship it.
+STAGE1_MAX_STEPS="${STAGE1_MAX_STEPS:-20000}"
+PRETRAINED_CKPT="${PRETRAINED_CKPT:-$CHECKPOINT_DIR}"
+
 if [ ! -d "$FISH_DIR" ]; then
   echo "ERROR: $FISH_DIR not found. Run:"
   echo "  git clone https://github.com/fishaudio/fish-speech $FISH_DIR"
@@ -67,8 +79,8 @@ python "$FISH_DIR/fish_speech/train.py" \
   +lora@model.model.lora_config=r_32_alpha_16_fast \
   train_dataset.proto_files="[$PROTO_DIR]" \
   val_dataset.proto_files="[$PROTO_DIR]" \
-  pretrained_ckpt_path="$CHECKPOINT_DIR" \
-  trainer.max_steps=20000 \
+  pretrained_ckpt_path="$PRETRAINED_CKPT" \
+  trainer.max_steps="$STAGE1_MAX_STEPS" \
   trainer.val_check_interval=1000 \
   hydra.run.dir="$OUTPUT_DIR"
 
@@ -87,7 +99,7 @@ fi
 echo "Merging $LATEST_CKPT"
 python "$FISH_DIR/tools/llama/merge_lora.py" \
   --lora-config r_32_alpha_16_fast \
-  --base-weight "$CHECKPOINT_DIR" \
+  --base-weight "$PRETRAINED_CKPT" \
   --lora-weight "$LATEST_CKPT" \
   --output "$OUTPUT_DIR/merged"
 

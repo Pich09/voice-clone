@@ -183,13 +183,12 @@ multiple people take turns training the *same* shared model:
 
 ```
 khmer_tts/inference/base.py        TTSBackend interface (engine-agnostic)
-khmer_tts/inference/fish_backend.py    Fish Speech backend  ⚠️ currently broken:
-                                        shells out to vendor/fish-speech/tools/
-                                        run_inference.py, which doesn't exist in
-                                        the current fish-speech repo. Real path is
-                                        TTSInferenceEngine (see scripts/14 above).
-                                        Known issue, not yet fixed (app-serving
-                                        layer, deprioritized vs. training).
+khmer_tts/inference/fish_backend.py    Fish Speech backend — loads the merged
+                                        checkpoint in-process via fish-speech's
+                                        ModelManager/TTSInferenceEngine (same
+                                        path scripts/14 validated). Earlier
+                                        versions shelled out to a nonexistent
+                                        tools/run_inference.py; fixed 2026-07-25.
 khmer_tts/inference/f5_backend.py       F5-TTS backend — stub, not implemented.
 khmer_tts/inference/cosyvoice_backend.py  CosyVoice backend — stub.
 khmer_tts/api.py                        Presumably a serving API wrapping a backend.
@@ -225,7 +224,7 @@ Dockerfile.api / docker-compose.yml     Containerized serving.
 - ⚠️ Currently blocked in practice by a Colab notebook-tab staleness issue (old cell
   code cached in an already-open tab, not re-syncing from GitHub pushes) — needs a
   fresh notebook re-open, not a code fix.
-- ❌ `fish_backend.py`'s inference path is broken (wrong script reference) — not fixed
-  yet, deprioritized.
+- ✅ `fish_backend.py` now uses the working TTSInferenceEngine path (fixed 2026-07-25);
+  eval scripts 13 and the notebook's inference cells run through it.
 - ❌ Objective eval metrics (SECS, Khmer CER), F5-TTS backend, and the HF-relay live
   test are all not done yet.
