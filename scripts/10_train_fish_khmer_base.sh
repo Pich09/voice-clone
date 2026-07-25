@@ -76,6 +76,12 @@ python "$FISH_DIR/tools/llama/build_dataset.py" \
   --num-workers 4
 
 echo "== Step 3: LoRA fine-tune Khmer base model =="
+# Checkpoint cadence: base.yaml's ModelCheckpoint fires every 5000 steps, so
+# any run shorter than that would finish with NO saved checkpoint and Step 4
+# below would fail after burning the whole GPU session. Save at least once
+# per run, and keep only the latest (save_top_k=1): each Lightning .ckpt
+# carries the full ~2GB model state, and only the newest is ever merged.
+CKPT_EVERY=$(( STAGE1_MAX_STEPS < 1000 ? STAGE1_MAX_STEPS : 1000 ))
 python "$FISH_DIR/fish_speech/train.py" \
   --config-name text2semantic_finetune \
   project=khmer_base \
@@ -85,6 +91,8 @@ python "$FISH_DIR/fish_speech/train.py" \
   pretrained_ckpt_path="$PRETRAINED_CKPT" \
   trainer.max_steps="$STAGE1_MAX_STEPS" \
   trainer.val_check_interval=1000 \
+  callbacks.model_checkpoint.every_n_train_steps="$CKPT_EVERY" \
+  callbacks.model_checkpoint.save_top_k=1 \
   hydra.run.dir="$OUTPUT_DIR"
 
 echo "== Step 4: Merge LoRA weights into a usable inference checkpoint =="

@@ -59,6 +59,9 @@ echo "== Step 3: Adapt Khmer base model to your voice (lower LR, fewer steps) ==
 # satisfies both. Dataset overrides use the top-level train_dataset/
 # val_dataset keys exactly like scripts/10 (the verified invocation) -- the
 # config's data.* node just interpolates from those.
+# Checkpoint cadence: same reasoning as scripts/10 -- base.yaml saves every
+# 5000 steps, which a short run never reaches, leaving Step 4 nothing to merge.
+CKPT_EVERY=$(( STAGE2_MAX_STEPS < 500 ? STAGE2_MAX_STEPS : 500 ))
 python "$FISH_DIR/fish_speech/train.py" \
   --config-name text2semantic_finetune \
   project=my_voice \
@@ -69,6 +72,8 @@ python "$FISH_DIR/fish_speech/train.py" \
   model.optimizer.lr=1e-5 \
   trainer.max_steps="$STAGE2_MAX_STEPS" \
   trainer.val_check_interval=200 \
+  callbacks.model_checkpoint.every_n_train_steps="$CKPT_EVERY" \
+  callbacks.model_checkpoint.save_top_k=1 \
   hydra.run.dir="$OUTPUT_DIR"
 
 echo "== Step 4: Merge LoRA weights into a usable inference checkpoint =="
