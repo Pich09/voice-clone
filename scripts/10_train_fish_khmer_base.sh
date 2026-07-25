@@ -8,10 +8,13 @@
 #   git clone https://github.com/fishaudio/fish-speech vendor/fish-speech
 #   pip install --no-deps -e vendor/fish-speech
 #   pip install hydra-core loguru natsort einops rich lightning tensorboard \
-#     loralib pyrootutils resampy "einx[torch]" zstandard pydub ormsgpack \
-#     tiktoken cachetools safetensors grpcio kui opencc-python-reimplemented \
-#     modelscope descript-audio-codec gradio wandb silero-vad \
-#     "transformers==4.56.1" "protobuf==4.25.5"
+#     loralib pyrootutils "einx[torch]" zstandard ormsgpack tiktoken \
+#     cachetools safetensors kui "transformers==4.56.1" "protobuf==4.25.5"
+#   # DAC codec chain: MUST be --no-deps (descript-audiotools' stale
+#   # protobuf<3.20 pin otherwise sends pip backtracking into broken sdists):
+#   pip install --no-deps descript-audio-codec==1.0.0 descript-audiotools==0.7.2
+#   pip install argbind julius pyloudnorm ffmpy flatten-dict markdown2 \
+#     randomname pystoi torch-stoi importlib-resources matplotlib
 #   Download base checkpoint (e.g. openaudio-s1-mini) into checkpoints/
 #
 # This follows Fish Speech's own documented flow:
