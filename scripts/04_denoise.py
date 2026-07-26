@@ -2,11 +2,19 @@
 """
 Selective denoising, per Section 6.3:
     A-grade -> keep raw (no denoise)
-    B-grade -> light denoise with DeepFilterNet
+    B-grade -> light denoise
     C/D     -> excluded upstream, but if present here, skip
 
+Denoiser backends, best available wins:
+    1. DeepFilterNet (`pip install deepfilternet`) -- best quality, but its
+       Rust native extension has no prebuilt wheel on some platforms
+       (fails to build on Kaggle, for example).
+    2. noisereduce (`pip install noisereduce`) -- pure-python spectral
+       gating, installs anywhere. Lighter touch than DeepFilterNet but a
+       real denoise, not a no-op.
+    3. plain copy-through -- smoke tests only.
+
 Usage:
-    pip install deepfilternet
     python scripts/04_denoise.py \
         --manifest data/manifests/ddd_qc.jsonl \
         --output_dir data/processed/ddd_denoised \
@@ -18,22 +26,52 @@ import os
 import shutil
 
 
-def denoise_file(input_path: str, output_path: str):
-    """Light denoise using DeepFilterNet. Falls back to a plain copy if
-    the library isn't installed, so the pipeline still runs end-to-end
-    for smoke testing without the heavy dependency."""
+def _load_denoiser():
+    """Return (backend_name, denoise_fn) for the best available backend;
+    denoise_fn is None for the copy-through fallback."""
     try:
         from df.enhance import enhance, init_df, load_audio, save_audio
+
+        model, df_state, _ = init_df()
+
+        def run_df(input_path, output_path):
+            audio, _ = load_audio(input_path, sr=df_state.sr())
+            save_audio(output_path, enhance(model, df_state, audio), df_state.sr())
+
+        return "deepfilternet", run_df
     except ImportError:
+        pass
+
+    try:
+        import noisereduce as nr
+        import soundfile as sf
+
+        def run_nr(input_path, output_path):
+            data, sr = sf.read(input_path)
+            if data.ndim > 1:
+                data = data.mean(axis=1)
+            # Light touch for B-grade clips: leave some noise floor rather
+            # than risk the musical-noise artifacts of full suppression.
+            cleaned = nr.reduce_noise(y=data, sr=sr, prop_decrease=0.9)
+            sf.write(output_path, cleaned, sr)
+
+        return "noisereduce", run_nr
+    except ImportError:
+        pass
+
+    return "copy", None
+
+
+def denoise_file(input_path: str, output_path: str):
+    """Denoise with the best available backend; plain copy if none."""
+    if not hasattr(denoise_file, "_backend"):
+        denoise_file._backend = _load_denoiser()
+        print(f"Denoise backend: {denoise_file._backend[0]}")
+    name, fn = denoise_file._backend
+    if fn is None:
         shutil.copyfile(input_path, output_path)
         return False
-
-    if not hasattr(denoise_file, "_model"):
-        denoise_file._model, denoise_file._df_state, _ = init_df()
-
-    audio, _ = load_audio(input_path, sr=denoise_file._df_state.sr())
-    enhanced = enhance(denoise_file._model, denoise_file._df_state, audio)
-    save_audio(output_path, enhanced, denoise_file._df_state.sr())
+    fn(input_path, output_path)
     return True
 
 
@@ -81,9 +119,11 @@ def main():
             n_kept += 1
 
     print(f"Kept: {n_kept}  (denoised: {n_denoised})  Rejected: {n_rejected}")
-    if n_denoised == 0:
-        print("Note: DeepFilterNet not installed -- B-grade files were copied "
-              "as-is. Run `pip install deepfilternet` for real denoising.")
+    if n_denoised == 0 and n_kept > 0:
+        print("Note: no denoiser installed -- B-grade files were copied as-is. "
+              "Run `pip install noisereduce` (works everywhere) or "
+              "`pip install deepfilternet` (better, needs a Rust-buildable "
+              "platform) for real denoising.")
 
 
 if __name__ == "__main__":
