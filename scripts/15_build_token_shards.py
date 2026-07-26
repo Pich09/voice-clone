@@ -453,6 +453,22 @@ def flush_to_shard(pending_dir, out_root, shard_id, args, source_files, timing):
     ], "build_dataset")
 
     n_npy = len(list(pending_dir.rglob("*.npy")))
+    if n_npy < len(wavs):
+        # extract_vq.py spawns --num-workers subprocesses via sp.Popen and only
+        # p.wait()s on them -- it never checks their returncode, so a worker
+        # that dies (e.g. CUDA OOM) makes the whole extract_vq.py process still
+        # exit 0. run() above only sees that outer exit code, so a crashed
+        # worker's files silently end up with no .npy sidecar and build_dataset
+        # just skips them -- no error, just a shard short on clips. Catch it
+        # here by checking output count against input count, mirroring the
+        # build_dataset zero-output guard added for scripts/10 and 12.
+        raise RuntimeError(
+            f"extract_vq produced {n_npy}/{len(wavs)} .npy sidecars for "
+            f"{shard_id} -- a worker likely crashed partway through (check "
+            "the log above for a CUDA OOM or similar traceback). Re-run to "
+            "continue from progress.json; consider lowering "
+            "--extract-batch-size or --extract-workers if it OOM'd."
+        )
     seconds = 0.0
     for w in wavs:
         try:
