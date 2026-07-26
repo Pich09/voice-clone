@@ -43,8 +43,17 @@ CONFIG="configs/train_fish_khmer.yaml"
 #                     this to a pulled merged checkpoint to resume across
 #                     sessions. codec.pth always comes from CHECKPOINT_DIR --
 #                     the codec is frozen and merged checkpoints don't ship it.
+#   TRAIN_BATCH_SIZE / TRAIN_MAX_LENGTH / GRAD_ACCUM
+#                     per-GPU memory knobs. fish-speech's defaults
+#                     (batch 4 x 4096-token PACKED sequences per GPU) are
+#                     sized for 24GB+ cards and OOM a 16GB T4 -- the
+#                     notebook sets 2/2048/2 on Kaggle. GRAD_ACCUM keeps the
+#                     effective batch up when the per-GPU batch shrinks.
 STAGE1_MAX_STEPS="${STAGE1_MAX_STEPS:-20000}"
 PRETRAINED_CKPT="${PRETRAINED_CKPT:-$CHECKPOINT_DIR}"
+TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-4}"
+TRAIN_MAX_LENGTH="${TRAIN_MAX_LENGTH:-4096}"
+GRAD_ACCUM="${GRAD_ACCUM:-1}"
 
 if [ ! -d "$FISH_DIR" ]; then
   echo "ERROR: $FISH_DIR not found. Run:"
@@ -89,6 +98,9 @@ python "$FISH_DIR/fish_speech/train.py" \
   train_dataset.proto_files="[$PROTO_DIR]" \
   val_dataset.proto_files="[$PROTO_DIR]" \
   pretrained_ckpt_path="$PRETRAINED_CKPT" \
+  max_length="$TRAIN_MAX_LENGTH" \
+  data.batch_size="$TRAIN_BATCH_SIZE" \
+  trainer.accumulate_grad_batches="$GRAD_ACCUM" \
   trainer.max_steps="$STAGE1_MAX_STEPS" \
   trainer.val_check_interval=1000 \
   callbacks.model_checkpoint.every_n_train_steps="$CKPT_EVERY" \

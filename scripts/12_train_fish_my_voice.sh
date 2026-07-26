@@ -23,8 +23,14 @@ CONFIG="configs/train_voice_clone.yaml"
 #   KHMER_BASE_CKPT   the MERGED Stage-1 checkpoint dir (model.pth +
 #                     config.json + tokenizer). Must be the merged/ dir --
 #                     models/khmer_base itself only holds hydra clutter.
+#   TRAIN_BATCH_SIZE / TRAIN_MAX_LENGTH / GRAD_ACCUM
+#                     per-GPU memory knobs, same semantics as scripts/10
+#                     (defaults OOM a 16GB T4; notebook sets 2/2048/2).
 STAGE2_MAX_STEPS="${STAGE2_MAX_STEPS:-3000}"
 KHMER_BASE_CKPT="${KHMER_BASE_CKPT:-models/khmer_base/merged}"
+TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-4}"
+TRAIN_MAX_LENGTH="${TRAIN_MAX_LENGTH:-4096}"
+GRAD_ACCUM="${GRAD_ACCUM:-1}"
 
 if [ ! -f "$KHMER_BASE_CKPT/model.pth" ]; then
   echo "ERROR: no merged Khmer base checkpoint at $KHMER_BASE_CKPT (model.pth missing)."
@@ -69,6 +75,9 @@ python "$FISH_DIR/fish_speech/train.py" \
   train_dataset.proto_files="[$PROTO_DIR]" \
   val_dataset.proto_files="[$PROTO_DIR]" \
   pretrained_ckpt_path="$KHMER_BASE_CKPT" \
+  max_length="$TRAIN_MAX_LENGTH" \
+  data.batch_size="$TRAIN_BATCH_SIZE" \
+  trainer.accumulate_grad_batches="$GRAD_ACCUM" \
   model.optimizer.lr=1e-5 \
   trainer.max_steps="$STAGE2_MAX_STEPS" \
   trainer.val_check_interval=200 \
