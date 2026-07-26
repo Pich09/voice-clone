@@ -59,7 +59,17 @@ def compute_metrics(audio_path: str) -> dict:
     }
 
 
-def grade(metrics: dict, text: str) -> str:
+def grade(metrics: dict, text: str, a_grade_min_sr: int = 16000) -> str:
+    """Grade one clip. `a_grade_min_sr` is the sample rate at or above which a
+    clip may qualify for A (kept raw, no denoising).
+
+    This used to be hardcoded at 22050, which made A UNREACHABLE for the DDD
+    corpus -- it ships at 16kHz (verified against the dataset's own Audio
+    feature). Every clip therefore graded B and got denoised, including
+    already-clean ones, and spectral-gating clean speech costs quality for
+    nothing. Sample rate is a bandwidth property, not a cleanliness one, so
+    the A/B decision should turn on clipping/silence/level.
+    """
     dur = metrics["duration"]
     sr = metrics["sample_rate"]
     clip = metrics["clipping_ratio"]
@@ -77,7 +87,7 @@ def grade(metrics: dict, text: str) -> str:
     if sil > 0.6:
         return "D"
 
-    if sr >= 22050 and clip == 0 and sil < 0.2 and -30 <= rms_db <= -12:
+    if sr >= a_grade_min_sr and clip == 0 and sil < 0.2 and -30 <= rms_db <= -12:
         return "A"
 
     if sil < 0.4 and rms_db > -35:
@@ -90,9 +100,15 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--manifest", required=True)
     parser.add_argument("--output", required=True)
+    parser.add_argument("--a_grade_min_sr", type=int, default=16000,
+                         help="Minimum sample rate eligible for grade A (kept "
+                              "raw). Default 16000 so 16kHz corpora like DDD "
+                              "can reach A; raise to 22050+ if your source "
+                              "audio is genuinely wideband.")
     args = parser.parse_args()
 
     grade_counts = {"A": 0, "B": 0, "C": 0, "D": 0}
+    sr_counts = {}
 
     with open(args.manifest, encoding="utf-8") as in_f, \
          open(args.output, "w", encoding="utf-8") as out_f:
@@ -110,8 +126,10 @@ def main():
                            "silence_ratio": 1.0}
 
             row.update(metrics)
-            row["quality_grade"] = grade(metrics, row.get("text", ""))
+            row["quality_grade"] = grade(metrics, row.get("text", ""),
+                                          args.a_grade_min_sr)
             grade_counts[row["quality_grade"]] += 1
+            sr_counts[metrics["sample_rate"]] = sr_counts.get(metrics["sample_rate"], 0) + 1
 
             out_f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
@@ -123,6 +141,18 @@ def main():
     for g in "ABCD":
         pct = 100 * grade_counts[g] / total if total else 0
         print(f"  {g}: {grade_counts[g]} ({pct:.1f}%)")
+
+    print(f"Source sample rates: "
+          + ", ".join(f"{sr}Hz x{n}" for sr, n in sorted(sr_counts.items())))
+    # A 16kHz source caps what TTS can ever sound like: step 06 resamples to
+    # 24kHz for Fish Speech's codec, but resampling cannot invent the missing
+    # 8-12kHz band, so synthesis will sound duller than a true 24kHz corpus.
+    low = sum(n for sr, n in sr_counts.items() if sr < 22050)
+    if low:
+        print(f"NOTE: {low}/{total} clips are below 22.05kHz. They get "
+              "upsampled to 24kHz later, which does NOT restore the missing "
+              "high frequencies -- expect a somewhat muffled timbre ceiling. "
+              "This is a property of the source corpus, not a pipeline bug.")
 
 
 if __name__ == "__main__":

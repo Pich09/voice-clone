@@ -76,8 +76,30 @@ def select_latest(entries) -> Optional[dict]:
 def bucket_for_key(key: str, num_shards: int) -> int:
     """Deterministically assign a stable key (e.g. a speaker_id) to one of
     `num_shards` buckets. Uses md5 so it is stable across processes/machines
-    (Python's builtin hash() is salted per-process and must not be used)."""
+    (Python's builtin hash() is salted per-process and must not be used).
+
+    WARNING: independent hashing is only balanced for *many* keys. With a
+    handful of speakers it is badly lopsided -- measured on the DDD corpus's
+    14 real speaker ids: 3/11 across 2 shards, and an entirely EMPTY shard at
+    4 or 5 shards (that collaborator downloads nothing and their session is
+    wasted). Prefer assign_shards() whenever the key set is known up front.
+    """
     if num_shards <= 1:
         return 0
     digest = hashlib.md5(str(key).encode("utf-8")).hexdigest()
     return int(digest, 16) % num_shards
+
+
+def assign_shards(keys, num_shards: int) -> dict:
+    """Balanced, deterministic key -> shard assignment.
+
+    Sorts the keys by their md5 digest (stable across machines and Python
+    versions, unlike hash()) and deals them round-robin, so shard sizes
+    differ by at most one key and no shard is ever empty when
+    len(keys) >= num_shards. Whole keys stay together, which is what matters
+    for TTS: one speaker's clips must not be split across collaborators.
+    """
+    if num_shards <= 1:
+        return {k: 0 for k in keys}
+    ordered = sorted(set(keys), key=lambda k: hashlib.md5(str(k).encode("utf-8")).hexdigest())
+    return {k: i % num_shards for i, k in enumerate(ordered)}

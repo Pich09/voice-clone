@@ -17,7 +17,7 @@ import json
 import os
 from typing import Optional
 
-from .registry import bucket_for_key
+from .registry import assign_shards, bucket_for_key
 
 # Candidate column names across DDD / generic HF ASR datasets.
 _AUDIO_KEYS = ("audio", "wav", "speech")
@@ -57,6 +57,7 @@ def stream_shard_to_disk(
     token: Optional[str] = None,
     seed: int = 42,
     shuffle_buffer: int = 5000,
+    known_speakers: Optional[list] = None,
 ) -> int:
     """Stream up to `take_n` clips belonging to this shard, writing wavs +
     a JSONL manifest compatible with the rest of the pipeline (audio_path,
@@ -70,8 +71,37 @@ def stream_shard_to_disk(
     ds = load_dataset(dataset_id, split=split, streaming=True, token=token)
     ds = ds.shuffle(seed=seed, buffer_size=shuffle_buffer)
 
+    # Balanced assignment when the speaker set is known (see assign_shards);
+    # otherwise fall back to independent hashing, which risks empty shards.
+    shard_map = None
+    if known_speakers and num_shards > 1:
+        shard_map = assign_shards(known_speakers, num_shards)
+        mine = sorted(s for s, b in shard_map.items() if b == shard_index)
+        if not mine:
+            raise ValueError(
+                f"shard_index={shard_index} of {num_shards} would get no "
+                f"speakers from {len(set(known_speakers))} known speakers -- "
+                "use fewer shards."
+            )
+        print(f"shard {shard_index}/{num_shards} covers {len(mine)} speaker(s): {mine}")
+
+    def shard_of(spk):
+        if shard_map is not None:
+            # An unlisted speaker (dataset grew) still needs a home.
+            return shard_map.get(spk, bucket_for_key(spk, num_shards))
+        return bucket_for_key(spk, num_shards)
+
     keys = None
     written = 0
+    # Defensive de-duplication. This repo's HF dataset carries several
+    # overlapping parquet shard-numbering generations (e.g.
+    # data/train-00000-of-00653.parquet alongside data/train-v39-00687.parquet)
+    # that the dataset's own "data/train-*" glob all matches, so the same
+    # utterance can be yielded more than once. Training twice on one clip
+    # wastes steps and nudges the model toward memorizing it. Keyed on
+    # (speaker, sentence_id) when available, else (speaker, text).
+    seen = set()
+    n_dup = 0
     with open(manifest_path, "w", encoding="utf-8") as mf:
         for i, row in enumerate(ds):
             if keys is None:
@@ -79,13 +109,19 @@ def stream_shard_to_disk(
 
             speaker = str(row.get(keys["speaker"], "unknown")) if keys["speaker"] else "unknown"
             # Assign whole speakers to shards; skip clips not in ours.
-            if bucket_for_key(speaker, num_shards) != shard_index:
+            if shard_of(speaker) != shard_index:
                 continue
 
             text = (row.get(keys["text"]) or "").strip()
             audio = row.get(keys["audio"])
             if not text or audio is None:
                 continue
+
+            dedup_key = (speaker, row.get("sentence_id") or text)
+            if dedup_key in seen:
+                n_dup += 1
+                continue
+            seen.add(dedup_key)
 
             array = audio["array"]
             sr = audio["sampling_rate"]
@@ -105,6 +141,8 @@ def stream_shard_to_disk(
             if written >= take_n:
                 break
 
+    if n_dup:
+        print(f"skipped {n_dup} duplicate clip(s) already streamed this session")
     return written
 
 
