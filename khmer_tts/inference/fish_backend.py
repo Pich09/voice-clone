@@ -43,6 +43,12 @@ class FishSpeechBackend(TTSBackend):
     def _engine(self):
         if self._manager is None:
             fish_dir = os.path.abspath(self.fish_speech_dir)
+            if not os.path.isdir(os.path.join(fish_dir, "fish_speech")):
+                raise FileNotFoundError(
+                    f"No fish-speech checkout at {fish_dir!r} -- clone it first "
+                    "(git clone https://github.com/fishaudio/fish-speech "
+                    "vendor/fish-speech) or pass fish_speech_dir=."
+                )
             if fish_dir not in sys.path:
                 sys.path.insert(0, fish_dir)
             from tools.server.model_manager import ModelManager

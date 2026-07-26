@@ -18,20 +18,40 @@ import os
 import soundfile as sf
 
 
+def _load_vad():
+    """Load Silero VAD ONCE and cache it. Loading per file (as this used to
+    do) re-instantiates the model thousands of times and dominates the
+    runtime of this step -- minutes became hours on a real corpus."""
+    if not hasattr(_load_vad, "_cached"):
+        try:
+            import torch
+            torch.set_num_threads(1)
+            model, utils = torch.hub.load(
+                repo_or_dir="snakers4/silero-vad", model="silero_vad", trust_repo=True
+            )
+            get_speech_timestamps, _, read_audio, *_rest = utils
+            _load_vad._cached = (model, get_speech_timestamps, read_audio)
+            print("VAD backend: silero-vad")
+        except Exception as e:
+            # No VAD available -- copy-through. Warn ONCE and loudly: silently
+            # passing every file through means --min_speech_ratio is never
+            # enforced and no silence is trimmed, which is easy to miss.
+            print(f"!! Silero VAD unavailable ({e!r}) -- files will be copied "
+                  "through UNTRIMMED and --min_speech_ratio will NOT be "
+                  "enforced. Install torch/torchaudio with network access for "
+                  "real VAD trimming.")
+            _load_vad._cached = None
+    return _load_vad._cached
+
+
 def get_speech_timestamps_and_trim(audio_path: str, out_path: str, min_speech_ratio: float):
     """Returns (kept: bool, speech_ratio: float)."""
-    try:
-        import torch
-        torch.set_num_threads(1)
-        model, utils = torch.hub.load(
-            repo_or_dir="snakers4/silero-vad", model="silero_vad", trust_repo=True
-        )
-        (get_speech_timestamps, _, read_audio, *_rest) = utils
-    except Exception as e:
-        # Fallback: no VAD available, just copy through and assume it passes.
+    vad = _load_vad()
+    if vad is None:
         import shutil
         shutil.copyfile(audio_path, out_path)
         return True, 1.0
+    model, get_speech_timestamps, read_audio = vad
 
     wav = read_audio(audio_path, sampling_rate=16000)
     timestamps = get_speech_timestamps(wav, model, sampling_rate=16000)
@@ -102,8 +122,17 @@ def main():
             row["speech_ratio"] = round(ratio, 4)
             out_f.write(json.dumps(row, ensure_ascii=False) + "\n")
             n_kept += 1
+            if n_kept % 500 == 0:
+                print(f"  ... trimmed {n_kept} files")
 
     print(f"Kept: {n_kept}  Rejected (too little speech): {n_rejected}")
+    if n_kept == 0:
+        raise SystemExit(
+            "ERROR: every clip was rejected -- nothing left to train on. "
+            "Check --min_speech_ratio (currently "
+            f"{args.min_speech_ratio}) and that the input audio really "
+            "contains speech."
+        )
 
 
 if __name__ == "__main__":

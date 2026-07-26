@@ -67,6 +67,13 @@ def validate(manifest_path: str) -> int:
         for e in errors[:20]:
             print("   -", e)
 
+    # An EMPTY manifest used to pass (n_bad == 0), letting the pipeline march
+    # into training with no data and fail much later with a confusing error.
+    if n_ok == 0:
+        print("  FAIL: manifest has no valid rows at all -- an upstream step "
+              "produced nothing. Fix that before spending GPU time.")
+        return 1
+
     return 0 if n_bad == 0 else 1
 
 

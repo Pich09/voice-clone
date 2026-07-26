@@ -89,7 +89,7 @@ def main():
     grade_order = {"A": 0, "B": 1, "C": 2, "D": 3}
     threshold = grade_order[args.min_grade_to_keep]
 
-    n_kept, n_denoised, n_rejected = 0, 0, 0
+    n_kept, n_denoised, n_rejected, n_b_grade = 0, 0, 0, 0
 
     with open(args.manifest, encoding="utf-8") as in_f, \
          open(args.output_manifest, "w", encoding="utf-8") as out_f:
@@ -110,6 +110,7 @@ def main():
             if g == "A":
                 shutil.copyfile(row["audio_path"], out_path)
             else:  # B-grade: light denoise
+                n_b_grade += 1
                 was_denoised = denoise_file(row["audio_path"], out_path)
                 if was_denoised:
                     n_denoised += 1
@@ -118,12 +119,23 @@ def main():
             out_f.write(json.dumps(row, ensure_ascii=False) + "\n")
             n_kept += 1
 
-    print(f"Kept: {n_kept}  (denoised: {n_denoised})  Rejected: {n_rejected}")
-    if n_denoised == 0 and n_kept > 0:
+    print(f"Kept: {n_kept}  (B-grade: {n_b_grade}, denoised: {n_denoised})  "
+          f"Rejected: {n_rejected}")
+    if n_b_grade == 0:
+        print("Note: no B-grade clips in this batch -- A-grade audio is kept "
+              "raw by design, so nothing needed denoising.")
+    elif n_denoised == 0:
         print("Note: no denoiser installed -- B-grade files were copied as-is. "
               "Run `pip install noisereduce` (works everywhere) or "
               "`pip install deepfilternet` (better, needs a Rust-buildable "
               "platform) for real denoising.")
+    if n_kept == 0:
+        raise SystemExit(
+            f"ERROR: all {n_rejected} clips were rejected by the "
+            f"--min_grade_to_keep={args.min_grade_to_keep} filter -- nothing "
+            "left to train on. Check scripts/03_audio_qc.py's grade "
+            "distribution above."
+        )
 
 
 if __name__ == "__main__":

@@ -91,6 +91,26 @@ class HFCheckpointRelay:
             return None
         return self._download_checkpoint(entry, dest_dir)
 
+    def pull(self, dest_dir: str, strategy: str = "latest"):
+        """Download a checkpoint into `dest_dir`, returning (path, entry) --
+        or (None, None) on the very first run.
+
+        strategy="latest" (default) resumes from the most-trained checkpoint,
+        so cumulative training always moves forward. strategy="best" resumes
+        from the lowest val_loss instead, which sounds safer but can STALL a
+        relay indefinitely: one session whose val_loss ticks up (ordinary
+        noise) means every later session re-trains from the same older
+        checkpoint and total steps never grow. `best` remains the right
+        choice for picking a checkpoint to *ship*, which is what
+        best_checkpoint() is for.
+        """
+        if strategy not in ("latest", "best"):
+            raise ValueError(f"unknown resume strategy {strategy!r}")
+        entry = self.latest_checkpoint() if strategy == "latest" else self.best_checkpoint()
+        if entry is None:
+            return None, None
+        return self._download_checkpoint(entry, dest_dir), entry
+
     def _download_checkpoint(self, entry: dict, dest_dir: str) -> str:
         from huggingface_hub import snapshot_download
         repo_subdir = entry["path"].rstrip("/")

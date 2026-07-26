@@ -69,6 +69,13 @@ def main():
 
     print(f"Done. OK: {n_ok}  Failed: {n_fail}")
     print(f"This is your clean manifest: {args.output_manifest}")
+    if n_ok == 0:
+        raise SystemExit(
+            "ERROR: ffmpeg failed on every file (or the input manifest was "
+            "empty), so the clean manifest is empty. Most likely ffmpeg is "
+            "not installed or not on PATH -- check `ffmpeg -version`. "
+            "Continuing would start training with no data."
+        )
 
 
 if __name__ == "__main__":

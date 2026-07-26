@@ -83,6 +83,9 @@ python "$FISH_DIR/fish_speech/train.py" \
   trainer.val_check_interval=200 \
   callbacks.model_checkpoint.every_n_train_steps="$CKPT_EVERY" \
   callbacks.model_checkpoint.save_top_k=1 \
+  +logger.csv._target_=lightning.pytorch.loggers.csv_logs.CSVLogger \
+  +logger.csv.save_dir="results/my_voice" \
+  +logger.csv.name=csv \
   hydra.run.dir="$OUTPUT_DIR"
 
 echo "== Step 4: Merge LoRA weights into a usable inference checkpoint =="
