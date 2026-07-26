@@ -90,6 +90,19 @@ python "$FISH_DIR/tools/llama/build_dataset.py" \
   --text-extension .lab \
   --num-workers 4
 
+# build_dataset.py only opens its output file INSIDE its results loop, so
+# zero input groups (e.g. extract_vq silently produced no .npy sidecars)
+# means zero .protos files with no error raised. Left undetected, this
+# reaches fish-speech's dataloader as an empty proto_files glob and crashes
+# with ZeroDivisionError in split_by_rank_worker -- fail loudly here
+# instead, before the training process (and its GPU time) even starts.
+if [ -z "$(find "$PROTO_DIR" -name '*.proto*' -print -quit 2>/dev/null)" ]; then
+  echo "ERROR: build_dataset produced zero proto files in $PROTO_DIR."
+  echo "Check that $DATASET_DIR has wav/lab pairs and that extract_vq (Step 1"
+  echo "above) actually wrote .npy sidecars next to them."
+  exit 1
+fi
+
 # Same treatment for the held-out validation split, when it exists.
 VAL_PROTO_ARG="$PROTO_DIR"
 if [ -d "$VAL_DATASET_DIR" ] && [ -n "$(ls -A "$VAL_DATASET_DIR" 2>/dev/null)" ]; then
@@ -106,7 +119,25 @@ if [ -d "$VAL_DATASET_DIR" ] && [ -n "$(ls -A "$VAL_DATASET_DIR" 2>/dev/null)" ]
     --output "$VAL_PROTO_DIR" \
     --text-extension .lab \
     --num-workers 4
-  VAL_PROTO_ARG="$VAL_PROTO_DIR"
+
+  # build_dataset.py only opens its output file INSIDE its results loop
+  # (tools/llama/build_dataset.py) -- if it finds zero groups (e.g. the val
+  # split's extract_vq pass produced no .npy sidecars, which happens
+  # silently, no error raised) it writes ZERO .protos files. Checking that
+  # the source wav/lab folder was non-empty (above) is not enough -- that
+  # only proves the INPUT existed, not that this step produced usable
+  # OUTPUT. Without this check a broken/empty validation build passes
+  # through as val_dataset.proto_files=[khmer_base_val_protos], and
+  # fish-speech's split_by_rank_worker crashes with a ZeroDivisionError
+  # (files*... // len(files), len==0) the moment sanity-checking starts --
+  # after VQ extraction has already burned the session's GPU time.
+  if [ -z "$(find "$VAL_PROTO_DIR" -name '*.proto*' -print -quit 2>/dev/null)" ]; then
+    echo "WARNING: validation build produced zero proto files in $VAL_PROTO_DIR"
+    echo "-- falling back to validating on the TRAINING set for this run."
+    VAL_PROTO_ARG="$PROTO_DIR"
+  else
+    VAL_PROTO_ARG="$VAL_PROTO_DIR"
+  fi
 else
   echo "WARNING: no validation data at $VAL_DATASET_DIR -- validating on the"
   echo "TRAINING set, so val_loss will not detect overfitting and the relay's"

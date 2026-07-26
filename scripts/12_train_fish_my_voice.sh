@@ -55,6 +55,18 @@ python "$FISH_DIR/tools/llama/build_dataset.py" \
   --text-extension .lab \
   --num-workers 2
 
+# build_dataset.py only opens its output file INSIDE its results loop, so
+# zero input groups (e.g. extract_vq silently produced no .npy sidecars)
+# means zero .protos files with no error raised -- reaches fish-speech's
+# dataloader as an empty proto_files glob and crashes with a
+# ZeroDivisionError in split_by_rank_worker. Fail loudly here instead.
+if [ -z "$(find "$PROTO_DIR" -name '*.proto*' -print -quit 2>/dev/null)" ]; then
+  echo "ERROR: build_dataset produced zero proto files in $PROTO_DIR."
+  echo "Check that $DATASET_DIR has wav/lab pairs and that extract_vq (Step 1"
+  echo "above) actually wrote .npy sidecars next to them."
+  exit 1
+fi
+
 echo "== Step 3: Adapt Khmer base model to your voice (lower LR, fewer steps) =="
 # pretrained_ckpt_path (NOT ckpt_path): ckpt_path is Lightning's
 # resume-full-trainer-state parameter and expects a .ckpt FILE -- handing it
