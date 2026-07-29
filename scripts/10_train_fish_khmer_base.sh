@@ -55,11 +55,19 @@ CONFIG="configs/train_fish_khmer.yaml"
 #                     sized for 24GB+ cards and OOM a 16GB T4 -- the
 #                     notebook sets 2/2048/2 on Kaggle. GRAD_ACCUM keeps the
 #                     effective batch up when the per-GPU batch shrinks.
+#   TRAIN_ACCELERATOR  overrides base.yaml's hardcoded trainer.accelerator=gpu.
+#                     The notebook sets this to "tpu" when it detects a TPU
+#                     and no CUDA GPU. Still EXPERIMENTAL -- fish-speech's
+#                     model code was written against CUDA-specific ops, so a
+#                     TPU run may still fail inside attention/codec kernels
+#                     with no XLA path; this only gets it past the trainer
+#                     construction Fish Speech would otherwise hardcode to gpu.
 STAGE1_MAX_STEPS="${STAGE1_MAX_STEPS:-20000}"
 PRETRAINED_CKPT="${PRETRAINED_CKPT:-$CHECKPOINT_DIR}"
 TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-4}"
 TRAIN_MAX_LENGTH="${TRAIN_MAX_LENGTH:-4096}"
 GRAD_ACCUM="${GRAD_ACCUM:-1}"
+TRAIN_ACCELERATOR="${TRAIN_ACCELERATOR:-gpu}"
 
 if [ ! -d "$FISH_DIR" ]; then
   echo "ERROR: $FISH_DIR not found. Run:"
@@ -162,6 +170,7 @@ python "$FISH_DIR/fish_speech/train.py" \
   max_length="$TRAIN_MAX_LENGTH" \
   data.batch_size="$TRAIN_BATCH_SIZE" \
   trainer.accumulate_grad_batches="$GRAD_ACCUM" \
+  trainer.accelerator="$TRAIN_ACCELERATOR" \
   trainer.max_steps="$STAGE1_MAX_STEPS" \
   trainer.val_check_interval=1000 \
   callbacks.model_checkpoint.every_n_train_steps="$CKPT_EVERY" \
