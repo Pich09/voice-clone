@@ -98,12 +98,33 @@ def main():
                               "even if that means fewer than --max_samples rows "
                               "get exported (e.g. many shards have empty/short "
                               "rows filtered out). Set to 0 to disable.")
+    parser.add_argument("--append", action="store_true",
+                         help="Add to an existing data/manifests/ddd_raw.jsonl "
+                              "instead of replacing it. Off by default -- see "
+                              "the truncation note below.")
     args = parser.parse_args()
 
     audio_dir = os.path.join(args.out_dir, "audio")
     os.makedirs(audio_dir, exist_ok=True)
     manifest_path = os.path.join("data", "manifests", "ddd_raw.jsonl")
     os.makedirs(os.path.dirname(manifest_path), exist_ok=True)
+
+    # Start the manifest fresh unless --append. The per-shard writers below
+    # open it in "a" mode so rows survive if a long download is interrupted
+    # partway, but that also meant a SECOND run silently stacked its rows on
+    # top of the first: run this twice with --max_samples 200 and you get a
+    # 400-row manifest, half of it pointing at audio that a later pipeline
+    # stage has since deleted (03_audio_qc then grades those D on an
+    # unreadable-file exception, so it degrades quietly rather than erroring).
+    # kaggle/khmer_tts_kaggle.ipynb worked around this by truncating the file
+    # itself before calling this script; owning it here means every caller
+    # gets the sane behaviour.
+    if not args.append and os.path.exists(manifest_path):
+        prev = sum(1 for _ in open(manifest_path, encoding="utf-8"))
+        open(manifest_path, "w").close()
+        if prev:
+            print(f"Replacing existing {manifest_path} ({prev} row(s)); "
+                  "pass --append to add to it instead.")
 
     n_written = 0
 

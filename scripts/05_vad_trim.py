@@ -114,7 +114,22 @@ def main():
     parser.add_argument("--output_dir", required=True)
     parser.add_argument("--output_manifest", required=True)
     parser.add_argument("--min_speech_ratio", type=float, default=0.4)
+    parser.add_argument("--vad", choices=("silero", "none"), default="silero",
+                        help="'none' copies every clip through untrimmed and "
+                             "does NOT enforce --min_speech_ratio. Use it when "
+                             "the input is known not to be natural speech -- "
+                             "Silero is a neural speech detector, so synthetic "
+                             "audio (tones, noise) yields zero speech "
+                             "timestamps and every clip is rejected, which "
+                             "looks like a pipeline bug but is correct "
+                             "behaviour. scripts/smoke_test.py passes this.")
     args = parser.parse_args()
+    if args.vad == "none":
+        # Force the copy-through path that _load_vad() already implements for
+        # the "Silero unavailable" case, without pretending it is unavailable.
+        _load_vad._cached = None
+        print("VAD backend: none (--vad none) -- clips copied through "
+              "untrimmed, --min_speech_ratio NOT enforced")
 
     os.makedirs(args.output_dir, exist_ok=True)
     os.makedirs(os.path.dirname(args.output_manifest), exist_ok=True)

@@ -140,11 +140,20 @@ def main():
                    "--output_dir", den_dir, "--output_manifest", den)
     step("04 denoise (graceful fallback)", ok and count_lines(den) > 0, tail)
 
-    # 5. VAD trim (copy-through fallback, no silero) -----------------------
+    # 5. VAD trim -----------------------------------------------------------
+    # --vad none is REQUIRED here, not a convenience: gen_audio() writes sine
+    # tones, and Silero is a neural *speech* detector, so it returns zero
+    # speech timestamps for them and 05 rejects every clip -- starving steps
+    # 06-09 and making six later checks fail for a reason that has nothing to
+    # do with them. This step used to assume Silero simply would not be
+    # installed ("copy-through fallback"), which stopped being true as soon as
+    # torch.hub had it cached. What is under test here is the manifest
+    # plumbing, so bypass the detector explicitly.
     vad_dir = os.path.join(WS, "vad"); vad = os.path.join(MAN, "vad.jsonl")
-    ok, tail = run("05_vad_trim.py", "--manifest", den,
+    ok, tail = run("05_vad_trim.py", "--manifest", den, "--vad", "none",
                    "--output_dir", vad_dir, "--output_manifest", vad)
-    step("05 VAD trim (graceful fallback)", ok and count_lines(vad) > 0, tail)
+    step("05 VAD trim (--vad none: synthetic audio is not speech)",
+         ok and count_lines(vad) > 0, tail)
 
     # 6. loudness (needs ffmpeg) — skip cleanly if absent ------------------
     clean = os.path.join(MAN, "clean.jsonl")

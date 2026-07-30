@@ -507,6 +507,20 @@ def flush_to_shard(pending_dir, out_root, shard_id, args, source_files, timing):
             "hours": round(seconds / 3600, 4), "proto_bytes": proto_bytes}
 
 
+def _default_dir(kaggle_path, local_name):
+    """Kaggle path when this really is Kaggle, else a local directory.
+
+    Checks the platform marker Kaggle itself sets rather than the existence of
+    /kaggle, which anything can create (see the note at the argparse defaults).
+    """
+    on_kaggle = ("KAGGLE_KERNEL_RUN_TYPE" in os.environ
+                 or "KAGGLE_URL_BASE" in os.environ
+                 or os.path.isdir("/kaggle/input"))
+    if on_kaggle:
+        return kaggle_path
+    return os.path.join(os.getcwd(), local_name)
+
+
 # --------------------------------------------------------------------------
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
@@ -529,8 +543,19 @@ def main():
     ap.add_argument("--pilot", type=int, default=0,
                     help="process only ~N clips, report measured throughput, "
                          "and DO NOT upload. Run this first.")
-    ap.add_argument("--parquet-dir", default="/kaggle/temp/ddd_parquet")
-    ap.add_argument("--work-dir", default="/kaggle/working/shardbuild")
+    # Kaggle paths are the DEFAULT only when actually on Kaggle. They used to
+    # be unconditional, which is worse than a permission error on other hosts:
+    # Colab runs as root, so /kaggle/working/shardbuild was happily CREATED
+    # there -- and a bare /kaggle directory was exactly what the notebooks'
+    # old platform check treated as proof of Kaggle. Running this on Colab
+    # therefore made every later notebook in the repo misdetect Colab as
+    # Kaggle, put WORKDIR on ephemeral disk instead of Drive, and look for
+    # Kaggle Secrets that do not exist. (The detection itself is fixed too,
+    # but nothing should be scattering /kaggle around in the first place.)
+    ap.add_argument("--parquet-dir", default=_default_dir("/kaggle/temp/ddd_parquet",
+                                                          "ddd_parquet"))
+    ap.add_argument("--work-dir", default=_default_dir("/kaggle/working/shardbuild",
+                                                        "shardbuild"))
     ap.add_argument("--fish-dir", default="vendor/fish-speech")
     ap.add_argument("--codec", default="checkpoints/openaudio-s1-mini/codec.pth")
     ap.add_argument("--extract-workers", type=int, default=4,
@@ -588,6 +613,22 @@ def main():
         log(f"resuming: {len(prog['processed_files'])} files done, "
             f"{prog['clips']:,} clips, {prog['hours']:.1f}h, "
             f"{len(prog['shards'])} shards, {len(seen):,} known keys")
+
+    # Totals carried in from previous sessions. `stats` below counts only what
+    # THIS invocation processes, so the running totals must be added to these
+    # rather than assigned over them. They used to be assigned
+    # (prog["clips"] = stats["clips"]), which silently reset the published
+    # counters to the current session's numbers every run: the DDD build ended
+    # up reporting 120,831 clips / 302.2h in progress.json when the shards it
+    # had actually published summed to 444,355 clips / 1,044.9h. Only these
+    # scalar counters were affected -- "shards" and "processed_files" use
+    # append/extend and were always right, which is why resume itself worked.
+    base = {
+        "clips": prog.get("clips", 0),
+        "seconds": prog.get("hours", 0.0) * 3600,
+        "rejected": prog.get("rejected", 0),
+        "duplicates": prog.get("duplicates", 0),
+    }
 
     all_files = list_source_files(args.dataset, token, args.include_partial_724)
     done = set(prog["processed_files"])
@@ -674,10 +715,11 @@ def main():
                         timing["upload"] += time.time() - t1
                         prog["shards"].append(info)
                         prog["processed_files"].extend(chunk_files)
-                        prog["clips"] = stats["clips"]
-                        prog["hours"] = round(stats["seconds"] / 3600, 3)
-                        prog["rejected"] = stats["rejected"]
-                        prog["duplicates"] = stats["duplicates"]
+                        prog["clips"] = base["clips"] + stats["clips"]
+                        prog["hours"] = round(
+                            (base["seconds"] + stats["seconds"]) / 3600, 3)
+                        prog["rejected"] = base["rejected"] + stats["rejected"]
+                        prog["duplicates"] = base["duplicates"] + stats["duplicates"]
                         repo.save_progress(prog)
                         repo.save_seen(seen)
                         shutil.rmtree(out_root / sid, ignore_errors=True)
@@ -702,8 +744,11 @@ def main():
                 repo.upload_shard(out_root / sid, sid)
                 prog["shards"].append(info)
                 prog["processed_files"].extend(chunk_files)
-                prog["clips"] = stats["clips"]
-                prog["hours"] = round(stats["seconds"] / 3600, 3)
+                prog["clips"] = base["clips"] + stats["clips"]
+                prog["hours"] = round(
+                    (base["seconds"] + stats["seconds"]) / 3600, 3)
+                prog["rejected"] = base["rejected"] + stats["rejected"]
+                prog["duplicates"] = base["duplicates"] + stats["duplicates"]
                 repo.save_progress(prog)
                 repo.save_seen(seen)
                 shutil.rmtree(out_root / sid, ignore_errors=True)
