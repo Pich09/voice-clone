@@ -97,6 +97,25 @@ echo "== Step 3: Adapt Khmer base model to your voice (lower LR, fewer steps) ==
 # config's data.* node just interpolates from those.
 # Checkpoint cadence: same reasoning as scripts/10 -- base.yaml saves every
 # 5000 steps, which a short run never reaches, leaving Step 4 nothing to merge.
+# Clear stale LoRA checkpoints before training. fish_speech/train.py
+# auto-resumes from the newest file in results/<project>/checkpoints
+# (get_latest_checkpoint, and it OVERRIDES cfg.ckpt_path, so there is no config
+# switch to disable it). Every checkpoint these scripts produce is LoRA-only --
+# ~15MB of adapter weights, not the 1.8GB full model -- because training always
+# runs with +lora@model.model.lora_config. Lightning restores it with a strict
+# load_state_dict against the full TextToSemantic, so resuming ALWAYS fails
+# with "Missing key(s) in state_dict: model.embeddings.weight, ...". A session
+# killed mid-training (Kaggle's 12h cap) therefore leaves a checkpoint that
+# poisons the NEXT run. Resuming across sessions is done properly via
+# PRETRAINED_CKPT / KHMER_BASE_CKPT (merged full weights), so nothing of value
+# is lost by clearing these.
+_CKPT_DIR="results/my_voice/checkpoints"
+if [ -n "$(find "$_CKPT_DIR" -name '*.ckpt' -print -quit 2>/dev/null)" ]; then
+  echo "Removing stale LoRA-only checkpoint(s) in $_CKPT_DIR (train.py would"
+  echo "auto-resume from them and fail with missing base-model keys):"
+  find "$_CKPT_DIR" -name '*.ckpt' -print -delete
+fi
+
 CKPT_EVERY=$(( STAGE2_MAX_STEPS < 500 ? STAGE2_MAX_STEPS : 500 ))
 # Same nccl-on-CPU problem as scripts/10 -- see the note there.
 STRATEGY_OVERRIDE=()

@@ -180,6 +180,25 @@ echo "== Step 3: LoRA fine-tune Khmer base model =="
 # below would fail after burning the whole GPU session. Save at least once
 # per run, and keep only the latest (save_top_k=1): each Lightning .ckpt
 # carries the full ~2GB model state, and only the newest is ever merged.
+# Clear stale LoRA checkpoints before training. fish_speech/train.py
+# auto-resumes from the newest file in results/<project>/checkpoints
+# (get_latest_checkpoint, and it OVERRIDES cfg.ckpt_path, so there is no config
+# switch to disable it). Every checkpoint these scripts produce is LoRA-only --
+# ~15MB of adapter weights, not the 1.8GB full model -- because training always
+# runs with +lora@model.model.lora_config. Lightning restores it with a strict
+# load_state_dict against the full TextToSemantic, so resuming ALWAYS fails
+# with "Missing key(s) in state_dict: model.embeddings.weight, ...". A session
+# killed mid-training (Kaggle's 12h cap) therefore leaves a checkpoint that
+# poisons the NEXT run. Resuming across sessions is done properly via
+# PRETRAINED_CKPT / KHMER_BASE_CKPT (merged full weights), so nothing of value
+# is lost by clearing these.
+_CKPT_DIR="results/khmer_base/checkpoints"
+if [ -n "$(find "$_CKPT_DIR" -name '*.ckpt' -print -quit 2>/dev/null)" ]; then
+  echo "Removing stale LoRA-only checkpoint(s) in $_CKPT_DIR (train.py would"
+  echo "auto-resume from them and fail with missing base-model keys):"
+  find "$_CKPT_DIR" -name '*.ckpt' -print -delete
+fi
+
 CKPT_EVERY=$(( STAGE1_MAX_STEPS < 1000 ? STAGE1_MAX_STEPS : 1000 ))
 # base.yaml hardcodes strategy: DDPStrategy(process_group_backend=nccl). nccl
 # is CUDA-only, so on a CPU-only host the Trainer cannot even build its process
