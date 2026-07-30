@@ -68,6 +68,27 @@ TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-4}"
 TRAIN_MAX_LENGTH="${TRAIN_MAX_LENGTH:-4096}"
 GRAD_ACCUM="${GRAD_ACCUM:-1}"
 TRAIN_ACCELERATOR="${TRAIN_ACCELERATOR:-gpu}"
+# Dataloader worker processes. Python 3.14 changed the default multiprocessing
+# start method on Linux from fork to forkserver, and forkserver PICKLES the
+# dataset to hand it to each worker -- which fails here because the dataset
+# carries a tiktoken-backed FishTokenizer that cannot be pickled. The worker
+# dies mid-handshake and the parent reports the unhelpful
+# "BrokenPipeError: [Errno 32] Broken pipe" from popen_forkserver._launch.
+# Under the old fork default nothing was pickled, so this only bites on 3.14+.
+# Forcing fork back is NOT the fix: fork with CUDA already initialized is
+# unsafe and is precisely what 3.14 moved away from. num_workers=0 loads in the
+# main process, which is correct everywhere and merely slower. The notebook
+# sets this to 0 when the interpreter's default start method is not fork.
+TRAIN_NUM_WORKERS="${TRAIN_NUM_WORKERS:-4}"
+# extract_vq sizing. The old hardcoded 4 workers x batch 16 is sized for
+# Kaggle's 2x T4 and CUDA-OOMs a small card (measured: batch 4 alone already
+# occupies ~3.9GB of a 4GB RTX 3050). This matters more than it looks --
+# extract_vq spawns its workers with sp.Popen and only p.wait()s them WITHOUT
+# checking returncodes, so an OOM-killed worker leaves the parent exiting 0
+# with .npy sidecars silently missing. The notebook sets these from detected
+# VRAM; the defaults below preserve the previous behaviour.
+EXTRACT_WORKERS="${EXTRACT_WORKERS:-4}"
+EXTRACT_BATCH_SIZE="${EXTRACT_BATCH_SIZE:-16}"
 
 if [ ! -d "$FISH_DIR" ]; then
   echo "ERROR: $FISH_DIR not found. Run:"
@@ -86,8 +107,8 @@ python scripts/patch_fish_speech_tokenizer.py --fish-dir "$FISH_DIR"
 echo "== Step 1: VQ token extraction =="
 python "$FISH_DIR/tools/vqgan/extract_vq.py" \
   "$DATASET_DIR" \
-  --num-workers 4 \
-  --batch-size 16 \
+  --num-workers "$EXTRACT_WORKERS" \
+  --batch-size "$EXTRACT_BATCH_SIZE" \
   --config-name "modded_dac_vq" \
   --checkpoint-path "$CHECKPOINT_DIR/codec.pth"
 
@@ -118,8 +139,8 @@ if [ -d "$VAL_DATASET_DIR" ] && [ -n "$(ls -A "$VAL_DATASET_DIR" 2>/dev/null)" ]
   mkdir -p "$VAL_PROTO_DIR"
   python "$FISH_DIR/tools/vqgan/extract_vq.py" \
     "$VAL_DATASET_DIR" \
-    --num-workers 4 \
-    --batch-size 16 \
+    --num-workers "$EXTRACT_WORKERS" \
+    --batch-size "$EXTRACT_BATCH_SIZE" \
     --config-name "modded_dac_vq" \
     --checkpoint-path "$CHECKPOINT_DIR/codec.pth"
   python "$FISH_DIR/tools/llama/build_dataset.py" \
@@ -160,8 +181,18 @@ echo "== Step 3: LoRA fine-tune Khmer base model =="
 # per run, and keep only the latest (save_top_k=1): each Lightning .ckpt
 # carries the full ~2GB model state, and only the newest is ever merged.
 CKPT_EVERY=$(( STAGE1_MAX_STEPS < 1000 ? STAGE1_MAX_STEPS : 1000 ))
+# base.yaml hardcodes strategy: DDPStrategy(process_group_backend=nccl). nccl
+# is CUDA-only, so on a CPU-only host the Trainer cannot even build its process
+# group. Drop the whole strategy node there (~ is hydra's delete) and let
+# Lightning choose its own default; on GPU/TPU leave it exactly as upstream has
+# it, since that is what the multi-GPU Kaggle path relies on.
+STRATEGY_OVERRIDE=()
+if [ "$TRAIN_ACCELERATOR" = "cpu" ]; then
+  STRATEGY_OVERRIDE=("~trainer.strategy")
+fi
 python "$FISH_DIR/fish_speech/train.py" \
   --config-name text2semantic_finetune \
+  "${STRATEGY_OVERRIDE[@]}" \
   project=khmer_base \
   +lora@model.model.lora_config=r_32_alpha_16_fast \
   train_dataset.proto_files="[$PROTO_DIR]" \
@@ -169,6 +200,7 @@ python "$FISH_DIR/fish_speech/train.py" \
   pretrained_ckpt_path="$PRETRAINED_CKPT" \
   max_length="$TRAIN_MAX_LENGTH" \
   data.batch_size="$TRAIN_BATCH_SIZE" \
+  data.num_workers="$TRAIN_NUM_WORKERS" \
   trainer.accumulate_grad_batches="$GRAD_ACCUM" \
   trainer.accelerator="$TRAIN_ACCELERATOR" \
   trainer.max_steps="$STAGE1_MAX_STEPS" \

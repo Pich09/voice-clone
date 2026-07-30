@@ -34,6 +34,21 @@ TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-4}"
 TRAIN_MAX_LENGTH="${TRAIN_MAX_LENGTH:-4096}"
 GRAD_ACCUM="${GRAD_ACCUM:-1}"
 TRAIN_ACCELERATOR="${TRAIN_ACCELERATOR:-gpu}"
+# Dataloader worker processes. Python 3.14 changed the default multiprocessing
+# start method on Linux from fork to forkserver, and forkserver PICKLES the
+# dataset to hand it to each worker -- which fails here because the dataset
+# carries a tiktoken-backed FishTokenizer that cannot be pickled. The worker
+# dies mid-handshake and the parent reports the unhelpful
+# "BrokenPipeError: [Errno 32] Broken pipe" from popen_forkserver._launch.
+# Under the old fork default nothing was pickled, so this only bites on 3.14+.
+# Forcing fork back is NOT the fix: fork with CUDA already initialized is
+# unsafe and is precisely what 3.14 moved away from. num_workers=0 loads in the
+# main process, which is correct everywhere and merely slower. The notebook
+# sets this to 0 when the interpreter's default start method is not fork.
+TRAIN_NUM_WORKERS="${TRAIN_NUM_WORKERS:-4}"
+# extract_vq sizing -- see scripts/10 for why these are not hardcoded.
+EXTRACT_WORKERS="${EXTRACT_WORKERS:-2}"
+EXTRACT_BATCH_SIZE="${EXTRACT_BATCH_SIZE:-8}"
 
 if [ ! -f "$KHMER_BASE_CKPT/model.pth" ]; then
   echo "ERROR: no merged Khmer base checkpoint at $KHMER_BASE_CKPT (model.pth missing)."
@@ -46,8 +61,8 @@ mkdir -p "$PROTO_DIR" "$OUTPUT_DIR"
 echo "== Step 1: VQ token extraction on your voice data =="
 python "$FISH_DIR/tools/vqgan/extract_vq.py" \
   "$DATASET_DIR" \
-  --num-workers 2 \
-  --batch-size 8 \
+  --num-workers "$EXTRACT_WORKERS" \
+  --batch-size "$EXTRACT_BATCH_SIZE" \
   --config-name "modded_dac_vq" \
   --checkpoint-path "$BASE_CHECKPOINT_DIR/codec.pth"
 
@@ -83,8 +98,14 @@ echo "== Step 3: Adapt Khmer base model to your voice (lower LR, fewer steps) ==
 # Checkpoint cadence: same reasoning as scripts/10 -- base.yaml saves every
 # 5000 steps, which a short run never reaches, leaving Step 4 nothing to merge.
 CKPT_EVERY=$(( STAGE2_MAX_STEPS < 500 ? STAGE2_MAX_STEPS : 500 ))
+# Same nccl-on-CPU problem as scripts/10 -- see the note there.
+STRATEGY_OVERRIDE=()
+if [ "$TRAIN_ACCELERATOR" = "cpu" ]; then
+  STRATEGY_OVERRIDE=("~trainer.strategy")
+fi
 python "$FISH_DIR/fish_speech/train.py" \
   --config-name text2semantic_finetune \
+  "${STRATEGY_OVERRIDE[@]}" \
   project=my_voice \
   +lora@model.model.lora_config=r_8_alpha_16 \
   train_dataset.proto_files="[$PROTO_DIR]" \
@@ -92,6 +113,7 @@ python "$FISH_DIR/fish_speech/train.py" \
   pretrained_ckpt_path="$KHMER_BASE_CKPT" \
   max_length="$TRAIN_MAX_LENGTH" \
   data.batch_size="$TRAIN_BATCH_SIZE" \
+  data.num_workers="$TRAIN_NUM_WORKERS" \
   trainer.accumulate_grad_batches="$GRAD_ACCUM" \
   trainer.accelerator="$TRAIN_ACCELERATOR" \
   model.optimizer.lr=1e-5 \

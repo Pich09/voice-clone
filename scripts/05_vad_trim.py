@@ -29,8 +29,8 @@ def _load_vad():
             model, utils = torch.hub.load(
                 repo_or_dir="snakers4/silero-vad", model="silero_vad", trust_repo=True
             )
-            get_speech_timestamps, _, read_audio, *_rest = utils
-            _load_vad._cached = (model, get_speech_timestamps, read_audio)
+            get_speech_timestamps, *_rest = utils
+            _load_vad._cached = (model, get_speech_timestamps)
             print("VAD backend: silero-vad")
         except Exception as e:
             # No VAD available -- copy-through. Warn ONCE and loudly: silently
@@ -44,6 +44,31 @@ def _load_vad():
     return _load_vad._cached
 
 
+def _read_audio_16k(audio_path: str):
+    """Load `audio_path` as a mono 16kHz float32 torch tensor.
+
+    Deliberately NOT silero's own read_audio(): that routes through
+    torchaudio, and torchaudio >= 2.9 delegates all audio I/O to torchcodec,
+    which needs the *shared* FFmpeg libraries (libavcodec.so et al) on the
+    system. A machine with only a static ffmpeg binary, or without the
+    ffmpeg -dev packages, therefore dies with "torchaudio version X requires
+    torchcodec for audio I/O" (seen in practice on Python 3.14 + torchaudio
+    2.11) even though every other stage of this pipeline reads the very same
+    file through soundfile without complaint. soundfile is already a hard
+    dependency here, so use it and do the resample ourselves.
+    """
+    import numpy as np
+    import torch
+
+    data, sr = sf.read(audio_path, always_2d=False, dtype="float32")
+    if data.ndim > 1:
+        data = data.mean(axis=1)
+    if sr != 16000:
+        import librosa
+        data = librosa.resample(data, orig_sr=sr, target_sr=16000)
+    return torch.from_numpy(np.ascontiguousarray(data, dtype=np.float32))
+
+
 def get_speech_timestamps_and_trim(audio_path: str, out_path: str, min_speech_ratio: float):
     """Returns (kept: bool, speech_ratio: float)."""
     vad = _load_vad()
@@ -51,9 +76,9 @@ def get_speech_timestamps_and_trim(audio_path: str, out_path: str, min_speech_ra
         import shutil
         shutil.copyfile(audio_path, out_path)
         return True, 1.0
-    model, get_speech_timestamps, read_audio = vad
+    model, get_speech_timestamps = vad
 
-    wav = read_audio(audio_path, sampling_rate=16000)
+    wav = _read_audio_16k(audio_path)
     timestamps = get_speech_timestamps(wav, model, sampling_rate=16000)
 
     if not timestamps:
