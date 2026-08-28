@@ -214,11 +214,18 @@ if not WORKDIR:
     if IN_KAGGLE:
         WORKDIR = '/kaggle/working/khmer-voice-clone'
     elif IN_COLAB:
-        # Mount Drive so the repo (code + downloaded data + checkpoints)
-        # survives a disconnect instead of vanishing with /content storage.
-        from google.colab import drive
-        drive.mount('/content/drive')
-        WORKDIR = '/content/drive/MyDrive/khmer-voice-clone'
+        # Deliberately NOT Drive. This notebook pulls the preprocessed
+        # dataset (~22GB+) and the checkpoint fresh from Hugging Face every
+        # session and publishes results back there too -- nothing here needs
+        # to survive a disconnect, which is the only reason to pay Drive's
+        # cost. And that cost is real: free-tier Drive's 15GB total quota is
+        # smaller than just the dataset download alone, so mounting Drive as
+        # WORKDIR fills it immediately and every download/training step
+        # after that fails with "No space left on device". Colab's local
+        # /content disk is far larger (70GB+) and exactly matches this
+        # notebook's own "nothing persists, everything round-trips through
+        # HF" design -- use it instead.
+        WORKDIR = '/content/khmer-voice-clone'
     else:
         # Local: walk UP from cwd looking for the repo root, so this works
         # whether the notebook's cwd is the repo root or kaggle/ (Jupyter
