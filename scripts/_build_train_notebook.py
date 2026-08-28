@@ -26,17 +26,19 @@ Runs unmodified on **Kaggle**, **Google Colab**, or a **local machine** — the
 environment is auto-detected in Section 1.
 
 Designed to be run **across many separate sessions**: each run pulls the
-most-trained checkpoint from your Hugging Face model repo
-(`Panhapich/Khmer-TTS`), trains `STAGE1_STEPS` more steps, then pushes the
-result back — tagged with its cumulative step count and validation loss —
-before the session ends. Nothing is lost between sessions; just re-run this
+`latest/` checkpoint from your Hugging Face model repo (`Panhapich/Tuna-TTS`),
+trains `STAGE1_STEPS` more steps, then overwrites `latest/` with the result
+(and `best/` too, if this session's validation loss is the new best) —
+tagged in `metadata.json` with cumulative step count and validation loss.
+Only the latest and best checkpoints are ever kept (not full history), to
+minimize storage. Nothing is lost between sessions; just re-run this
 notebook (Kaggle/Colab quotas reset regularly) to keep going.
 
 **Setup**
 1. Enable a GPU: Kaggle -> Settings > Accelerator > GPU T4 x2; Colab ->
    Runtime > Change runtime type > GPU.
 2. Add an `HF_TOKEN` secret (Kaggle: Add-ons > Secrets; Colab: the key icon
-   sidebar) — needed to push checkpoints to your `Panhapich/Khmer-TTS` repo.
+   sidebar) — needed to push checkpoints to your `Panhapich/Tuna-TTS` repo.
 3. Run All.
 """))
 
@@ -65,13 +67,14 @@ WORKDIR      = ""   # "" = auto-pick per environment (see Section 2)
 HF_DATA_REPO  = "Panhapich/khmer-tts-processed"
 DATA_CACHE_KEY = "khmer_base_v1"
 
-# --- Checkpoint relay: resume/publish across sessions via your HF repo ---
+# --- Checkpoint store: resume/publish across sessions via your HF repo ---
+# Keeps only two checkpoints in the repo -- `latest/` (always overwritten) and
+# `best/` (overwritten only when a session's val_loss improves on it) -- plus
+# metadata.json, instead of a full per-session history. See
+# khmer_tts/collab/checkpoint_store.py.
 BASE_CKPT_REPO   = "fishaudio/openaudio-s1-mini"  # free pretrained Fish Speech checkpoint
 HF_CKPT_REPO     = "Panhapich/Tuna-TTS"           # your repo -- created automatically if missing
 TRAINER_ID       = "panhapich"                    # just needs to be non-empty
-RESUME_STRATEGY  = "latest"   # "latest" keeps cumulative steps moving forward every
-                               # session; "best" can stall progress if one noisy
-                               # session's val_loss ticks up. See hf_relay.py.
 
 # --- Run size ---
 STAGE1_STEPS = 2000   # additional steps to train THIS session (target ~20000 total)
@@ -567,17 +570,22 @@ cells.append(md("""\
 ## 5 - Pull the most-trained checkpoint
 
 Every session resumes from wherever the LAST session (yours, from any
-device) left off, via the registry in `Panhapich/Khmer-TTS`. The very first
-run finds nothing and starts from the base pretrained checkpoint instead.
+device) left off -- the `latest/` checkpoint in `Panhapich/Tuna-TTS`. The
+very first run finds nothing and starts from the base pretrained checkpoint
+instead. (Resuming always uses `latest`, never `best` -- resuming from
+`best` can stall progress indefinitely: one session whose val_loss ticks up
+from ordinary noise would mean every later session restarts from the same
+older checkpoint and cumulative steps stop growing. `best/` is kept purely
+as a separate, safe-to-ship reference.)
 """))
 
 cells.append(code("""\
-from khmer_tts.collab import HFCheckpointRelay
+from khmer_tts.collab import CheckpointStore
 
-relay = HFCheckpointRelay(HF_CKPT_REPO, token=os.environ.get('HF_TOKEN'))
-relay.ensure_repo()
+store = CheckpointStore(HF_CKPT_REPO, token=os.environ.get('HF_TOKEN'))
+store.ensure_repo()
 
-ok, lk = relay.acquire_lock(TRAINER_ID, ttl_sec=6 * 3600)
+ok, lk = store.acquire_lock(TRAINER_ID, ttl_sec=6 * 3600)
 if not ok:
     raise SystemExit(
         f\"Repo is locked by {lk.get('owner')} until it expires -- if that's an \"
@@ -585,16 +593,18 @@ if not ok:
         \"for it to expire (6h) or acquire it again from that session.\"
     )
 
-print('best checkpoint so far  :', relay.best_checkpoint())
-print('latest checkpoint so far:', relay.latest_checkpoint())
+meta = store.load_metadata()
+print('best so far  :', f\"step {meta.get('best_step')} val_loss={meta.get('best_val_loss')}\"
+      if meta.get('best_step') is not None else '(none yet)')
+print('latest so far:', f\"step {meta.get('latest_step')} val_loss={meta.get('latest_val_loss')}\"
+      if meta.get('latest_step') is not None else '(none yet)')
 
-RESUME_CKPT, RESUME_ENTRY = relay.pull('checkpoints/_resume', strategy=RESUME_STRATEGY)
-# Cumulative step count continues from whatever we actually resumed FROM (not
-# from `best`) -- otherwise published step numbers desync from how much
-# training the weights have actually seen.
-RESUME_STEP = int(RESUME_ENTRY['step']) if RESUME_ENTRY else 0
-print(f'resuming ({RESUME_STRATEGY}) from:',
-      RESUME_CKPT or '(none yet -- starting from the base checkpoint)',
+RESUME_DIR = 'checkpoints/_resume'
+FOUND = store.pull_latest(RESUME_DIR)
+RESUME_CKPT = RESUME_DIR if FOUND else None
+# Cumulative step count continues from whatever we actually resumed FROM.
+RESUME_STEP = int(meta.get('latest_step') or 0) if FOUND else 0
+print('resuming from:', RESUME_CKPT or '(none yet -- starting from the base checkpoint)',
       f'at step {RESUME_STEP}')
 """))
 
@@ -653,48 +663,26 @@ report_disk('after training cleanup')
 cells.append(md("""\
 ## 7 - Publish the checkpoint
 
-Pushes what this session trained to `Panhapich/Khmer-TTS`, tagged with its
-cumulative step count and validation loss, so `latest_checkpoint()` /
-`best_checkpoint()` stay correct for the next session (this device or any
-other). Also writes a small human-readable `metadata.json` at the repo root.
+Overwrites `latest/` in `Panhapich/Tuna-TTS` with what this session trained
+(and `best/` too, if this session's val_loss is the new best), and updates
+`metadata.json` at the repo root. Only these two checkpoints + the metadata
+file are ever stored -- no per-session history -- to keep the repo small.
 """))
 
 cells.append(code("""\
 from khmer_tts.collab import read_val_loss
-import json, time
-from huggingface_hub import upload_file
 
 new_step = RESUME_STEP + STAGE1_STEPS
 vloss = read_val_loss('results/khmer_base') or read_val_loss('models/khmer_base')
 print('publishing: step', new_step, 'val_loss', vloss)
 
 # Publish the MERGED checkpoint (model.pth + config.json + tokenizer) --
-# models/khmer_base itself is just hydra's run dir.
-entry = relay.publish('models/khmer_base/merged', step=new_step, val_loss=vloss,
-                      trainer_id=TRAINER_ID, shard_index=0)
-relay.release_lock(TRAINER_ID)
-print('pushed', entry['path'], 'to', HF_CKPT_REPO)
-
-# Friendly summary on top of the full registry.json history -- latest/best
-# pointers plus session count, so the repo is browsable without parsing JSON.
-latest = relay.latest_checkpoint()
-best = relay.best_checkpoint()
-registry = relay.load_registry()
-metadata = {
-    'latest_step': latest['step'] if latest else None,
-    'latest_path': latest['path'] if latest else None,
-    'latest_val_loss': latest.get('val_loss') if latest else None,
-    'best_step': best['step'] if best else None,
-    'best_path': best['path'] if best else None,
-    'best_val_loss': best.get('val_loss') if best else None,
-    'sessions': len(registry.get('checkpoints', [])),
-    'updated': time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime()),
-}
-_tmp = 'metadata.json'
-with open(_tmp, 'w', encoding='utf-8') as f:
-    json.dump(metadata, f, ensure_ascii=False, indent=2)
-upload_file(path_or_fileobj=_tmp, path_in_repo='metadata.json',
-           repo_id=HF_CKPT_REPO, repo_type='model', token=os.environ.get('HF_TOKEN'))
+# models/khmer_base itself is just hydra's run dir. store.publish() overwrites
+# latest/ unconditionally and best/ only if vloss improves on the recorded
+# best, then rewrites metadata.json to match.
+metadata = store.publish('models/khmer_base/merged', step=new_step, val_loss=vloss,
+                         trainer_id=TRAINER_ID)
+store.release_lock(TRAINER_ID)
 print('metadata:', metadata)
 print(f'https://huggingface.co/{HF_CKPT_REPO}')
 """))
@@ -718,7 +706,7 @@ import IPython.display as ipd, glob
 for w in sorted(glob.glob(_eval_dir + '/*.wav'))[:3]:
     print(w); ipd.display(ipd.Audio(w))
 
-relay.api.upload_folder(repo_id=HF_CKPT_REPO, repo_type='model',
+store.api.upload_folder(repo_id=HF_CKPT_REPO, repo_type='model',
                         folder_path=_eval_dir, path_in_repo=f'eval/{_tag}',
                         commit_message=f'eval samples {_tag}')
 print(f'Uploaded eval samples to https://huggingface.co/{HF_CKPT_REPO}/tree/main/eval/{_tag}')

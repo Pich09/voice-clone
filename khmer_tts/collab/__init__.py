@@ -10,6 +10,7 @@ See `hf_relay.HFCheckpointRelay` and `sharding.stream_shard_to_disk`.
 
 from .registry import CheckpointEntry, select_best, select_latest, bucket_for_key
 from .hf_relay import HFCheckpointRelay
+from .checkpoint_store import CheckpointStore
 from .sharding import stream_shard_to_disk, detect_keys, read_val_loss
 from .data_cache import cache_key, download_and_restore, pack_and_upload, exists
 
@@ -19,6 +20,7 @@ __all__ = [
     "select_latest",
     "bucket_for_key",
     "HFCheckpointRelay",
+    "CheckpointStore",
     "stream_shard_to_disk",
     "detect_keys",
     "read_val_loss",
