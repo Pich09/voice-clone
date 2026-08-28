@@ -67,7 +67,7 @@ DATA_CACHE_KEY = "khmer_base_v1"
 
 # --- Checkpoint relay: resume/publish across sessions via your HF repo ---
 BASE_CKPT_REPO   = "fishaudio/openaudio-s1-mini"  # free pretrained Fish Speech checkpoint
-HF_CKPT_REPO     = "Panhapich/Khmer-TTS"          # your repo -- created automatically if missing
+HF_CKPT_REPO     = "Panhapich/Tuna-TTS"           # your repo -- created automatically if missing
 TRAINER_ID       = "panhapich"                    # just needs to be non-empty
 RESUME_STRATEGY  = "latest"   # "latest" keeps cumulative steps moving forward every
                                # session; "best" can stall progress if one noisy
