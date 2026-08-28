@@ -14,6 +14,7 @@ Usage:
         --valid_frac 0.02 --test_frac 0.02
 """
 import argparse
+import collections
 import json
 import os
 import random
@@ -27,6 +28,11 @@ def main():
     parser.add_argument("--valid_frac", type=float, default=0.02)
     parser.add_argument("--test_frac", type=float, default=0.02)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--holdout_speakers", nargs="*", default=[],
+                         help="Speaker id(s) to reserve entirely for test "
+                              "(e.g. to check generalization to an unseen "
+                              "voice), instead of being split like everyone "
+                              "else.")
     args = parser.parse_args()
 
     random.seed(args.seed)
@@ -38,14 +44,37 @@ def main():
             if line:
                 rows.append(json.loads(line))
 
-    random.shuffle(rows)
-    n = len(rows)
-    n_valid = int(n * args.valid_frac)
-    n_test = int(n * args.test_frac)
+    holdout = set(args.holdout_speakers)
+    by_speaker = collections.defaultdict(list)
+    for r in rows:
+        by_speaker[r.get("speaker_id", "unknown")].append(r)
 
-    valid_rows = rows[:n_valid]
-    test_rows = rows[n_valid:n_valid + n_test]
-    train_rows = rows[n_valid + n_test:]
+    # Split per speaker rather than globally shuffling all rows together --
+    # a global shuffle can put a low-utterance-count speaker entirely into
+    # valid/test with zero train exposure, which defeats multi-speaker base
+    # training for that speaker. Splitting within each speaker's own rows
+    # guarantees every non-holdout speaker with >=1 utterance keeps at least
+    # one utterance in train.
+    valid_rows, test_rows, train_rows = [], [], []
+    for speaker, group in by_speaker.items():
+        if speaker in holdout:
+            test_rows.extend(group)
+            continue
+
+        group = list(group)
+        random.shuffle(group)
+        n_group = len(group)
+        n_valid = int(n_group * args.valid_frac)
+        n_test = int(n_group * args.test_frac)
+        # Never take every utterance from a speaker into valid/test -- keep
+        # at least one in train whenever the speaker has any at all.
+        if n_valid + n_test >= n_group:
+            n_valid = min(n_valid, max(n_group - 1, 0))
+            n_test = min(n_test, max(n_group - 1 - n_valid, 0))
+
+        valid_rows.extend(group[:n_valid])
+        test_rows.extend(group[n_valid:n_valid + n_test])
+        train_rows.extend(group[n_valid + n_test:])
 
     def write(path, rows_):
         with open(path, "w", encoding="utf-8") as f:
@@ -60,7 +89,7 @@ def main():
     total_hours = sum(r["duration"] for r in rows) / 3600
     train_hours = sum(r["duration"] for r in train_rows) / 3600
 
-    print(f"Total: {n} utterances, {total_hours:.2f} hours")
+    print(f"Total: {len(rows)} utterances, {total_hours:.2f} hours ({len(by_speaker)} speakers)")
     print(f"  Train: {len(train_rows)} ({train_hours:.2f}h)")
     print(f"  Valid: {len(valid_rows)}")
     print(f"  Test:  {len(test_rows)}")

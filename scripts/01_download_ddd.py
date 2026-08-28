@@ -19,6 +19,19 @@ import os
 
 import soundfile as sf
 
+# `datasets.load_dataset` normally writes a reusable Arrow-format cache to
+# ~/.cache/huggingface/datasets/ during parquet->Arrow conversion, separate
+# from (and in addition to) the raw file `hf_hub_download` caches. Each shard
+# gets its own cache dir there (keyed by a hash of the file path) that is
+# NEVER reused since every shard is a distinct file -- so on a full run it
+# silently accumulates a second near-full copy of the dataset on disk.
+# `keep_in_memory=True` on the load_dataset call is NOT enough to prevent
+# this (it only affects whether the *resulting* Dataset is memory-mapped,
+# not whether the on-disk prepare step happens) -- disable_caching() is what
+# actually skips writing that cache.
+import datasets
+datasets.disable_caching()
+
 
 def list_shard_files(dataset: str, split: str) -> list[str]:
     """Repo files that make up `split`, in a stable order.
@@ -71,18 +84,48 @@ def _hf_hub_download_with_retry(dataset: str, shard_file: str, attempts: int = 5
 
 
 def rows_from_shard(dataset: str, shard_file: str, split: str):
-    """Download one shard file and yield its rows (small, bounded download)."""
+    """Download one shard file and yield its rows (small, bounded download).
+
+    Two disk-footprint traps here, both hit in practice on a full ~130-shard
+    run and both silent until the drive nearly fills:
+    1. `hf_hub_download` on Windows without symlink support (no Developer
+       Mode / not running as admin) writes a REAL copy per shard into the
+       hub cache (~/.cache/huggingface/hub/datasets--.../snapshots/), not a
+       symlink to a shared blob -- so it grows by the full shard size every
+       time, never reused. We delete `local_path` ourselves once its rows
+       are consumed instead of relying on hub cache eviction (there isn't
+       any).
+    2. `load_dataset("parquet", ...)` by default also materializes its OWN
+       Arrow-format cache under ~/.cache/huggingface/datasets/, a SEPARATE
+       copy of the same data again. `keep_in_memory=True` skips writing that
+       cache at all -- one shard easily fits in memory.
+    Net effect without both fixes: ~2x the compressed dataset size
+    accumulates on disk as unrecoverable "cache", on top of the actual
+    exported wav output -- enough to fill a modest drive well before the
+    download itself finishes.
+    """
     from datasets import Audio, load_dataset
 
     local_path = _hf_hub_download_with_retry(dataset, shard_file)
-    shard_ds = load_dataset("parquet", data_files={split: local_path}, split=split)
-    # Keep audio as raw bytes rather than letting `datasets` auto-decode --
-    # recent `datasets` versions require the extra `torchcodec` dependency for
-    # that, which we don't otherwise need. We decode with `soundfile` (already
-    # a required dep) in export_row() instead.
-    if "audio" in shard_ds.features:
-        shard_ds = shard_ds.cast_column("audio", Audio(decode=False))
-    yield from shard_ds
+    try:
+        shard_ds = load_dataset("parquet", data_files={split: local_path}, split=split,
+                                 keep_in_memory=True)
+        # Keep audio as raw bytes rather than letting `datasets` auto-decode --
+        # recent `datasets` versions require the extra `torchcodec` dependency
+        # for that, which we don't otherwise need. We decode with `soundfile`
+        # (already a required dep) in export_row() instead.
+        if "audio" in shard_ds.features:
+            shard_ds = shard_ds.cast_column("audio", Audio(decode=False))
+        yield from shard_ds
+    finally:
+        # Rows above are fully materialized in memory by keep_in_memory=True,
+        # so it's safe to drop the cached parquet file as soon as we're done
+        # with it here, even though callers (the shard loop in main()) keep
+        # consuming/exporting rows after this generator returns.
+        try:
+            os.remove(local_path)
+        except OSError:
+            pass
 
 
 def main():
@@ -101,30 +144,51 @@ def main():
     parser.add_argument("--append", action="store_true",
                          help="Add to an existing data/manifests/ddd_raw.jsonl "
                               "instead of replacing it. Off by default -- see "
-                              "the truncation note below.")
+                              "the truncation note below. Also required to "
+                              "resume a shard-by-shard run (see --resumable).")
+    parser.add_argument("--resumable", action="store_true",
+                         help="Download shard-by-shard (like the bounded "
+                              "--max_samples path) even without a sample cap, "
+                              "recording each fully-downloaded shard in a "
+                              "state file so a later run with --append can "
+                              "skip shards already done instead of "
+                              "restarting the whole (streamed) download from "
+                              "scratch. Recommended for large unbounded runs.")
     args = parser.parse_args()
 
     audio_dir = os.path.join(args.out_dir, "audio")
     os.makedirs(audio_dir, exist_ok=True)
     manifest_path = os.path.join("data", "manifests", "ddd_raw.jsonl")
     os.makedirs(os.path.dirname(manifest_path), exist_ok=True)
+    state_path = manifest_path + ".shards_done"
 
-    # Start the manifest fresh unless --append. The per-shard writers below
-    # open it in "a" mode so rows survive if a long download is interrupted
-    # partway, but that also meant a SECOND run silently stacked its rows on
-    # top of the first: run this twice with --max_samples 200 and you get a
-    # 400-row manifest, half of it pointing at audio that a later pipeline
-    # stage has since deleted (03_audio_qc then grades those D on an
-    # unreadable-file exception, so it degrades quietly rather than erroring).
-    # kaggle/khmer_tts_kaggle.ipynb worked around this by truncating the file
-    # itself before calling this script; owning it here means every caller
-    # gets the sane behaviour.
-    if not args.append and os.path.exists(manifest_path):
-        prev = sum(1 for _ in open(manifest_path, encoding="utf-8"))
-        open(manifest_path, "w").close()
-        if prev:
-            print(f"Replacing existing {manifest_path} ({prev} row(s)); "
-                  "pass --append to add to it instead.")
+    # Start the manifest (and shard state) fresh unless --append. The
+    # per-shard writers below open the manifest in "a" mode so rows survive
+    # if a long download is interrupted partway, but that also meant a
+    # SECOND run silently stacked its rows on top of the first: run this
+    # twice with --max_samples 200 and you get a 400-row manifest, half of it
+    # pointing at audio that a later pipeline stage has since deleted
+    # (03_audio_qc then grades those D on an unreadable-file exception, so it
+    # degrades quietly rather than erroring). kaggle/khmer_tts_kaggle.ipynb
+    # worked around this by truncating the file itself before calling this
+    # script; owning it here means every caller gets the sane behaviour.
+    if not args.append:
+        if os.path.exists(manifest_path):
+            prev = sum(1 for _ in open(manifest_path, encoding="utf-8"))
+            open(manifest_path, "w").close()
+            if prev:
+                print(f"Replacing existing {manifest_path} ({prev} row(s)); "
+                      "pass --append to add to it instead.")
+        if os.path.exists(state_path):
+            os.remove(state_path)
+
+    shards_done = set()
+    if args.append and os.path.exists(state_path):
+        with open(state_path, encoding="utf-8") as f:
+            shards_done = {line.strip() for line in f if line.strip()}
+        if shards_done:
+            print(f"Resuming: {len(shards_done)} shard(s) already downloaded "
+                  f"(from {state_path}), skipping those.")
 
     n_written = 0
 
@@ -148,7 +212,7 @@ def main():
             source = io.BytesIO(data) if data else audio["path"]
             array, sr = sf.read(source)
 
-        fname = f"{speaker_id}_{i:07d}.wav"
+        fname = f"{speaker_id}_{i}.wav"
         out_path = os.path.join(audio_dir, fname)
         sf.write(out_path, array, sr)
 
@@ -165,9 +229,11 @@ def main():
         if n_written % 500 == 0:
             print(f"  ... {n_written} samples exported")
 
-    if args.max_samples:
-        # Bounded case: fetch shard files one at a time, stop the moment we
-        # have enough -- never touches more of the dataset than necessary.
+    if args.max_samples or args.resumable:
+        # Shard-by-shard case: fetch shard files one at a time. Used for
+        # bounded (--max_samples) runs, and for --resumable unbounded runs so
+        # a later --append run can skip shards already fully downloaded
+        # (recorded in `state_path`) instead of restarting from scratch.
         print(f"Listing shard files for {args.dataset} [{args.split}] ...")
         shard_files = list_shard_files(args.dataset, args.split)
         if not shard_files:
@@ -177,39 +243,53 @@ def main():
             )
         if args.max_shard_files:
             shard_files = shard_files[: args.max_shard_files]
-        print(f"{len(shard_files)} shard file(s) available; pulling only as many as needed "
-              f"for {args.max_samples} samples "
-              f"(hard cap: {args.max_shard_files or 'none'} shard files).")
+        remaining = [f for f in shard_files if f not in shards_done]
+        print(f"{len(shard_files)} shard file(s) available "
+              f"({len(shard_files) - len(remaining)} already done, "
+              f"{len(remaining)} remaining)"
+              + (f"; pulling only as many as needed for {args.max_samples} samples"
+                 if args.max_samples else "")
+              + f" (hard cap: {args.max_shard_files or 'none'} shard files).")
 
-        i = 0
         shards_fetched = 0
         shards_skipped = 0
-        with open(manifest_path, "a", encoding="utf-8") as manifest_f:
-            for shard_file in shard_files:
-                if n_written >= args.max_samples:
+        manifest_f = open(manifest_path, "a", encoding="utf-8")
+        state_f = open(state_path, "a", encoding="utf-8") if args.resumable else None
+        try:
+            for shard_idx, shard_file in enumerate(shard_files):
+                if shard_file in shards_done:
+                    continue
+                if args.max_samples and n_written >= args.max_samples:
                     break
                 print(f"  fetching {shard_file} ...")
                 shards_fetched += 1
                 try:
-                    for row in rows_from_shard(args.dataset, shard_file, args.split):
-                        if n_written >= args.max_samples:
+                    for row_idx, row in enumerate(rows_from_shard(args.dataset, shard_file, args.split)):
+                        if args.max_samples and n_written >= args.max_samples:
                             break
-                        export_row(i, row, manifest_f)
-                        i += 1
+                        export_row(f"{shard_idx:04d}_{row_idx:05d}", row, manifest_f)
                 except Exception as e:
                     # A single shard can be permanently unavailable (a broken
                     # signing config on one specific HF Xet CDN blob, seen in
                     # practice -- retries inside rows_from_shard already ruled
-                    # out a transient blip). With many shards to pick from and
-                    # only --max_samples needed, skip this one and keep going
-                    # instead of aborting the whole download over one file.
+                    # out a transient blip). With many shards to pick from,
+                    # skip this one and keep going instead of aborting the
+                    # whole download over one file.
                     shards_skipped += 1
                     print(f"  SKIPPING {shard_file} -- unavailable after retries ({e!r})")
                     continue
+                else:
+                    if state_f:
+                        state_f.write(shard_file + "\n")
+                        state_f.flush()
+        finally:
+            manifest_f.close()
+            if state_f:
+                state_f.close()
         if shards_skipped:
             print(f"Skipped {shards_skipped}/{len(shard_files)} unavailable shard file(s).")
 
-        if n_written < args.max_samples and args.max_shard_files:
+        if args.max_samples and n_written < args.max_samples and args.max_shard_files:
             print(f"  (stopped after hitting the {args.max_shard_files}-shard-file cap, "
                   f"only {n_written} samples collected -- raise --max_shard_files to get more)")
     else:

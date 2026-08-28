@@ -7,6 +7,7 @@ __pycache__/
 data/raw/**/*.wav
 data/processed/**/*.wav
 data/manifests/*.jsonl
+data/manifests/*.jsonl.shards_done
 !data/manifests/.gitkeep
 
 # Generated Fish Speech training data (speaker-folder wav/lab pairs + built
