@@ -88,6 +88,20 @@ def download_and_restore(repo_id: str, key: str, workdir: str,
             _safe_extract(tar, workdir)
     except Exception:
         return False
+    finally:
+        # `fp` is a real file (or the real blob a symlink points at) sitting
+        # in the huggingface_hub cache -- left alone, it doubles peak disk
+        # usage for the rest of the session (the ~22GB archive PLUS its
+        # ~22GB extracted contents, both live at once). Kaggle/Colab's local
+        # disk is nowhere near big enough to carry that alongside the base
+        # checkpoint, VQ tokens, protobuf shards, and training output too.
+        # Safe to delete once extraction succeeds (or even on failure --
+        # hf_hub_download just re-fetches it next time): the archive itself
+        # is never read again after this point.
+        try:
+            os.remove(os.path.realpath(fp))
+        except OSError:
+            pass
     return True
 
 

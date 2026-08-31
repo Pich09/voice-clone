@@ -76,12 +76,20 @@ class CheckpointStore:
         except Exception:
             return False
         src = os.path.join(snap, subfolder)
-        if not os.path.isdir(src) or not os.listdir(src):
-            return False
-        if os.path.isdir(dest_dir):
-            shutil.rmtree(dest_dir)
-        shutil.copytree(src, dest_dir)
-        return True
+        ok = os.path.isdir(src) and bool(os.listdir(src))
+        if ok:
+            if os.path.isdir(dest_dir):
+                shutil.rmtree(dest_dir)
+            shutil.copytree(src, dest_dir)
+        # `snap` is a real copy (or the real blobs a symlink snapshot points
+        # at) sitting in self.cache_dir -- now duplicated into dest_dir too,
+        # and NOTHING ever cleans self.cache_dir between sessions, so it
+        # would otherwise grow by a checkpoint's size every single session.
+        # Safe to remove once copied (or on a miss): pull_latest/pull_best
+        # are only ever called once per session, right at the start.
+        shutil.rmtree(self.cache_dir, ignore_errors=True)
+        os.makedirs(self.cache_dir, exist_ok=True)
+        return ok
 
     # ---- publishing -----------------------------------------------------
     def publish(self, local_ckpt_dir: str, step: int,
