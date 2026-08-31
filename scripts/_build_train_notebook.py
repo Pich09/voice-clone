@@ -678,9 +678,19 @@ report_disk('before training')
 # above a generic "exit code 1".
 _log_path = 'outputs/logs/10_train.log'
 os.makedirs('outputs/logs', exist_ok=True)
+# Piping through `tee` means stdout is no longer a TTY, which makes Python
+# (and most CLI tools, via libc) switch from line-buffered to fully
+# block-buffered output -- nothing appears in the cell OR the log file for
+# potentially the entire run, even though it's working the whole time, since
+# the buffer only flushes when it fills or the process exits. `stdbuf -oL -eL`
+# forces line buffering via LD_PRELOAD, which (unlike PYTHONUNBUFFERED) also
+# propagates to the python subprocesses scripts/10 itself spawns (extract_vq
+# workers, the trainer), not just the outer bash script.
 result = subprocess.run(
-    ['bash', '-c', 'set -o pipefail; bash scripts/10_train_fish_khmer_base.sh 2>&1 '
-                    f'| tee {_log_path}'])
+    ['bash', '-c',
+     'set -o pipefail; stdbuf -oL -eL bash scripts/10_train_fish_khmer_base.sh 2>&1 '
+     f'| tee {_log_path}'],
+    env={**os.environ, 'PYTHONUNBUFFERED': '1'})
 if result.returncode != 0:
     # Read the log file back and put its tail directly INTO the exception --
     # don't make the user go dig for it in a separate cell, since Colab's
