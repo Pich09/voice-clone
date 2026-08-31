@@ -649,17 +649,25 @@ else:
 report_disk('before training')
 # Tee to a log file (in addition to streaming into this cell) -- Colab
 # collapses/truncates very long cell output, which can hide the actual error
-# above a generic "exit code 1". If that happens, run in a new cell:
-#   !tail -n 100 outputs/logs/10_train.log
+# above a generic "exit code 1".
+_log_path = 'outputs/logs/10_train.log'
 os.makedirs('outputs/logs', exist_ok=True)
 result = subprocess.run(
     ['bash', '-c', 'set -o pipefail; bash scripts/10_train_fish_khmer_base.sh 2>&1 '
-                    '| tee outputs/logs/10_train.log'])
+                    f'| tee {_log_path}'])
 if result.returncode != 0:
+    # Read the log file back and put its tail directly INTO the exception --
+    # don't make the user go dig for it in a separate cell, since Colab's
+    # collapsed-output UI is exactly what hides it in the first place.
+    if os.path.exists(_log_path):
+        with open(_log_path, encoding='utf-8', errors='replace') as _f:
+            _tail = _f.read()[-6000:]
+    else:
+        _tail = f'(no log file was created at {_log_path} -- the script ' \\
+                'failed before it produced any output at all)'
     raise RuntimeError(
-        f'10_train_fish_khmer_base.sh failed (exit code {result.returncode}) -- '
-        'see the output above for the real error, or run '
-        '`!tail -n 100 outputs/logs/10_train.log` in a new cell if Colab truncated it.'
+        f'10_train_fish_khmer_base.sh failed (exit code {result.returncode}).\\n\\n'
+        f'--- tail of {_log_path} ---\\n{_tail}'
     )
 
 # scripts/10's own Step 4 already merged the LoRA delta into
