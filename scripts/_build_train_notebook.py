@@ -482,6 +482,16 @@ if _failed:
         'See the pip output above for each one.'
     )
 
+# Colab preinstalls wandb, but fish-speech's WandbLogger is commented out in
+# its base config -- nothing here actually uses it. fish_speech/utils/utils.py
+# still unconditionally `import wandb` whenever it's merely installed
+# (find_spec check, not an actual-usage check), and wandb's bundled generated
+# wandb_telemetry_pb2.py is incompatible with the protobuf version pinned
+# above (needed by other deps), so just having wandb installed crashes
+# training with an unrelated-looking ImportError. Uninstall it.
+subprocess.run([sys.executable, '-m', 'pip', 'uninstall', '-y', '-q', 'wandb'],
+               capture_output=True)
+
 _hydra_patch = os.path.join(WORKDIR, 'scripts', 'patch_hydra_py314_help.py')
 if os.path.isfile(_hydra_patch):
     _hp = subprocess.run([sys.executable, _hydra_patch], capture_output=True, text=True)
