@@ -150,17 +150,33 @@ GRAD_ACCUM = max(1, 4 // TRAIN_BATCH_SIZE)
 
 # extract_vq has its own memory profile (codec + padded raw waveforms) --
 # see khmer_tts_kaggle.ipynb Section 1 for measured sizing.
+#
+# extract_vq.py round-robins its workers across CUDA_VISIBLE_DEVICES (i %
+# num_gpus), so on a SINGLE-GPU box every worker lands on the same card --
+# the old flat "4 workers x batch 16" (sized for Kaggle's 2x T4, i.e. 2
+# workers/GPU) put all 4 on one GPU on single-GPU Colab and reliably
+# CUDA-OOM'd (measured: a 14.56GB T4 OOMs with ~13.9GB already in use partway
+# through). extract_vq spawns workers with sp.Popen and only p.wait()s them
+# WITHOUT checking returncodes, so an OOM-killed worker leaves the parent
+# exiting 0 with its .npy sidecars silently missing -- Step 2 then finds zero
+# groups and fails with no memory error anywhere in the log. Size per-GPU and
+# multiply by however many GPUs are actually visible instead of hardcoding a
+# worker count sized for a specific platform's card count.
+N_GPUS = max(1, torch.cuda.device_count()) if ACCELERATOR == 'gpu' else 1
 if ACCELERATOR == 'cpu':
     EXTRACT_WORKERS, EXTRACT_BATCH_SIZE = 1, 4
 elif not VRAM_GB:
     EXTRACT_WORKERS, EXTRACT_BATCH_SIZE = 1, 8
 elif VRAM_GB < 6:
-    EXTRACT_WORKERS, EXTRACT_BATCH_SIZE = 1, 4
+    EXTRACT_WORKERS, EXTRACT_BATCH_SIZE = 1 * N_GPUS, 4
 elif VRAM_GB < 12:
-    EXTRACT_WORKERS, EXTRACT_BATCH_SIZE = 1, 8
+    EXTRACT_WORKERS, EXTRACT_BATCH_SIZE = 1 * N_GPUS, 8
+elif VRAM_GB < 20:
+    EXTRACT_WORKERS, EXTRACT_BATCH_SIZE = 2 * N_GPUS, 8
 else:
-    EXTRACT_WORKERS, EXTRACT_BATCH_SIZE = 4, 16
-print(f'extract : {EXTRACT_WORKERS} worker(s), batch {EXTRACT_BATCH_SIZE}')
+    EXTRACT_WORKERS, EXTRACT_BATCH_SIZE = 2 * N_GPUS, 16
+print(f'extract : {EXTRACT_WORKERS} worker(s) across {N_GPUS} GPU(s), '
+      f'batch {EXTRACT_BATCH_SIZE}')
 
 # Python 3.14+ switched Linux's multiprocessing default from fork to
 # forkserver, which cannot pickle fish-speech's tiktoken-backed tokenizer --
