@@ -66,6 +66,14 @@ WORKDIR      = ""   # "" = auto-pick per environment (see Section 2)
 # docstring. This notebook only downloads and extracts it.
 HF_DATA_REPO  = "Panhapich/khmer-tts-processed"
 DATA_CACHE_KEY = "khmer_base_v1"
+# Kaggle's /kaggle/working is hard-capped at 20GB -- smaller than the full
+# ~22GB processed dataset. On Kaggle this notebook pulls ONE shard of the
+# training audio at a time (round-robin across sessions, tracked in
+# HF_DATA_REPO itself) instead of the whole thing; Colab's much larger local
+# disk doesn't need this. Shards are built once, locally, via
+# scripts/reshard_processed_data.py -- this notebook only ever consumes
+# them, and reads the actual shard count from that upload rather than
+# hardcoding one here.
 
 # --- Checkpoint store: resume/publish across sessions via your HF repo ---
 # Keeps only two checkpoints in the repo -- `latest/` (always overwritten) and
@@ -578,39 +586,98 @@ print(os.listdir(CKPT_DIR))
 """))
 
 cells.append(code("""\
-# Pull the preprocessed training data (built once locally by running
-# scripts/01-09, then uploaded with khmer_tts.collab.data_cache.pack_and_upload
-# -- see that module's docstring). This notebook does NOT rebuild it.
-from khmer_tts.collab import download_and_restore
+# Pull the preprocessed training data. On Colab/local this is the full
+# dataset, built once by scripts/01-09 and uploaded with
+# khmer_tts.collab.data_cache.pack_and_upload() -- see that module's
+# docstring. This notebook never rebuilds it.
+#
+# Kaggle's /kaggle/working is hard-capped at 20GB -- smaller than the full
+# ~22GB dataset -- so Kaggle instead requires kaggle/preprocess_khmer_vq.ipynb
+# to have ALREADY VQ-extracted and packed every data shard into protobufs
+# (much smaller than raw audio) via scripts/reshard_processed_data.py +
+# scripts/10a_extract_vq_and_build_protos.sh. This notebook then just pulls
+# those ready-made protobufs -- it never touches raw audio on Kaggle at all,
+# so Step 1 (VQ extraction) is skipped entirely on that platform.
+from khmer_tts.collab import (
+    download_and_restore, get_shard_count, get_ready_shards, is_val_ready,
+    download_and_restore_ready_shard, download_and_restore_ready_val,
+)
 
 report_disk('before data download')
-ok = download_and_restore(HF_DATA_REPO, DATA_CACHE_KEY, WORKDIR, token=os.environ.get('HF_TOKEN'))
-if not ok:
-    raise SystemExit(
-        f'No preprocessed data found at {HF_DATA_REPO} under key {DATA_CACHE_KEY!r}. '
-        'Run the data pipeline (scripts/01-09) somewhere first, then '
-        'khmer_tts.collab.data_cache.pack_and_upload(HF_DATA_REPO, DATA_CACHE_KEY, ...) '
-        'to publish it -- this notebook only trains, it does not preprocess.'
-    )
-print('Preprocessed data restored:')
-for _p in ('data/fish/khmer_base', 'data/fish/khmer_base_val',
-           'data/manifests/ddd_train.jsonl', 'data/manifests/ddd_valid.jsonl'):
-    print(' ', _p, '- present' if os.path.exists(_p) else '- MISSING')
 
-# VQ token extraction (Section 6's Step 1) is the slowest part of a session
-# by far -- hours over the full dataset -- and is 100% deterministic given
-# the same audio + the same codec checkpoint, yet its .npy sidecar output was
-# being thrown away at the end of every session (see Section 6's cleanup) and
-# recomputed from scratch next time, because the archive above only ever
-# contained the wav/lab audio. Overlay a second, separate cache of just the
-# .npy sidecars a PRIOR session already computed, if one exists -- Step 1's
-# extract_vq.py already skips any file whose .npy sidecar exists, so this
-# alone turns a re-run into a near-instant no-op instead of hours of GPU time.
-# Safe to skip on a miss (nothing cached yet, e.g. the very first run ever).
-VQ_CACHE_KEY = DATA_CACHE_KEY + '_vq'
-_vq_hit = download_and_restore(HF_DATA_REPO, VQ_CACHE_KEY, WORKDIR, token=os.environ.get('HF_TOKEN'))
-print(f'VQ token cache ({VQ_CACHE_KEY}):', 'restored -- Step 1 will skip already-extracted files'
-      if _vq_hit else 'none yet -- Step 1 will extract from scratch this session')
+PROTO_FILES = None       # set below on Kaggle; scripts/10 builds its own on Colab/local
+VAL_PROTO_FILES = None
+VQ_CACHE_KEY = None      # Colab/local only -- see Section 6
+
+if IN_KAGGLE:
+    _tok = os.environ.get('HF_TOKEN')
+    _n_shards = get_shard_count(HF_DATA_REPO, DATA_CACHE_KEY, token=_tok)
+    if not _n_shards:
+        raise SystemExit(
+            f'No SHARDED data found at {HF_DATA_REPO} under key {DATA_CACHE_KEY!r}. '
+            'Run scripts/reshard_processed_data.py once (from a machine that already '
+            'has the full processed data) to build shards.'
+        )
+    _done = get_ready_shards(HF_DATA_REPO, DATA_CACHE_KEY, token=_tok)
+    if len(_done) < _n_shards:
+        _missing = sorted(set(range(_n_shards)) - _done)
+        raise SystemExit(
+            f'Only {len(_done)}/{_n_shards} shards are VQ-preprocessed yet '
+            f'(missing: {_missing}). Run kaggle/preprocess_khmer_vq.ipynb '
+            '(Run All, possibly across several sessions -- it resumes where it '
+            'left off) until all shards are ready, THEN come back to this notebook.'
+        )
+    if not is_val_ready(HF_DATA_REPO, DATA_CACHE_KEY, token=_tok):
+        raise SystemExit(
+            f'Validation set is not VQ-preprocessed yet at {HF_DATA_REPO}. Run '
+            'kaggle/preprocess_khmer_vq.ipynb first (it also processes the val set).'
+        )
+
+    _proto_dirs = []
+    for _i in range(_n_shards):
+        _dir = f'data/fish/khmer_shards/shard{_i}_protos'
+        ok = download_and_restore_ready_shard(HF_DATA_REPO, DATA_CACHE_KEY, _i, _n_shards,
+                                              WORKDIR, token=_tok)
+        if not ok:
+            raise SystemExit(f'Shard {_i} was marked ready but its archive failed to download.')
+        _proto_dirs.append(_dir)
+    ok = download_and_restore_ready_val(HF_DATA_REPO, DATA_CACHE_KEY, WORKDIR, token=_tok)
+    if not ok:
+        raise SystemExit('Validation protos were marked ready but the archive failed to download.')
+
+    PROTO_FILES = '[' + ','.join(_proto_dirs) + ']'
+    VAL_PROTO_FILES = '[data/fish/khmer_val_protos]'
+    print(f'Kaggle: all {_n_shards} shards + val are VQ-ready. PROTO_FILES={PROTO_FILES}')
+else:
+    ok = download_and_restore(HF_DATA_REPO, DATA_CACHE_KEY, WORKDIR, token=os.environ.get('HF_TOKEN'))
+    if not ok:
+        raise SystemExit(
+            f'No preprocessed data found at {HF_DATA_REPO} under key {DATA_CACHE_KEY!r}. '
+            'Run the data pipeline (scripts/01-09) somewhere first, then '
+            'khmer_tts.collab.data_cache.pack_and_upload(HF_DATA_REPO, DATA_CACHE_KEY, ...) '
+            'to publish it -- this notebook only trains, it does not preprocess.'
+        )
+    print('Preprocessed data restored:')
+    for _p in ('data/fish/khmer_base', 'data/fish/khmer_base_val',
+               'data/manifests/ddd_train.jsonl', 'data/manifests/ddd_valid.jsonl'):
+        print(' ', _p, '- present' if os.path.exists(_p) else '- MISSING')
+
+    # VQ token extraction (Section 6's Step 1) is the slowest part of a
+    # session by far -- hours over the full dataset -- and is 100%
+    # deterministic given the same audio + the same codec checkpoint, yet its
+    # .npy sidecar output was being thrown away at the end of every session
+    # (see Section 6's cleanup) and recomputed from scratch next time, because
+    # the archive above only ever contained the wav/lab audio. Overlay a
+    # second, separate cache of just the .npy sidecars a PRIOR session
+    # already computed, if one exists -- Step 1's extract_vq.py already skips
+    # any file whose .npy sidecar exists, so this alone turns a re-run into a
+    # near-instant no-op instead of hours of GPU time. Safe to skip on a miss
+    # (nothing cached yet, e.g. the very first run ever). Kaggle never runs
+    # Step 1 at all (see above), so this only matters on Colab/local.
+    VQ_CACHE_KEY = DATA_CACHE_KEY + '_vq'
+    _vq_hit = download_and_restore(HF_DATA_REPO, VQ_CACHE_KEY, WORKDIR, token=os.environ.get('HF_TOKEN'))
+    print(f'VQ token cache ({VQ_CACHE_KEY}):', 'restored -- Step 1 will skip already-extracted files'
+          if _vq_hit else 'none yet -- Step 1 will extract from scratch this session')
 report_disk('after data download')
 """))
 
@@ -660,9 +727,11 @@ cells.append(md("## 6 - Train"))
 
 cells.append(code("""\
 import os, subprocess, glob
-# scripts/10 reads these from the environment -- no editing the script in
-# place (in-place edits dirty the git tree and break Section 2's `git pull`
-# the next time this WORKDIR is reused).
+
+_TRAIN_SCRIPT = 'scripts/10b_train_from_protos.sh' if IN_KAGGLE else 'scripts/10_train_fish_khmer_base.sh'
+# scripts/10 (and 10b) read these from the environment -- no editing the
+# script in place (in-place edits dirty the git tree and break Section 2's
+# `git pull` the next time this WORKDIR is reused).
 os.environ['STAGE1_MAX_STEPS'] = str(RESUME_STEP + STAGE1_STEPS)
 os.environ.setdefault('TRAIN_ACCELERATOR', ACCELERATOR)
 if ACCELERATOR == 'gpu':
@@ -670,8 +739,14 @@ if ACCELERATOR == 'gpu':
     os.environ.setdefault('TRAIN_MAX_LENGTH', str(TRAIN_MAX_LENGTH))
     os.environ.setdefault('GRAD_ACCUM', str(GRAD_ACCUM))
 os.environ.setdefault('TRAIN_NUM_WORKERS', str(TRAIN_NUM_WORKERS))
-os.environ.setdefault('EXTRACT_WORKERS', str(EXTRACT_WORKERS))
-os.environ.setdefault('EXTRACT_BATCH_SIZE', str(EXTRACT_BATCH_SIZE))
+if IN_KAGGLE:
+    # 10b never runs extract_vq (Section 4 already required VQ-ready protos),
+    # so these knobs don't apply -- it reads the shard protos directly.
+    os.environ['PROTO_FILES'] = PROTO_FILES
+    os.environ['VAL_PROTO_FILES'] = VAL_PROTO_FILES
+else:
+    os.environ.setdefault('EXTRACT_WORKERS', str(EXTRACT_WORKERS))
+    os.environ.setdefault('EXTRACT_BATCH_SIZE', str(EXTRACT_BATCH_SIZE))
 if RESUME_CKPT:
     # Resume from the pulled merged checkpoint (model.pth + config.json +
     # tokenizer). Only PRETRAINED_CKPT moves -- codec.pth still comes from
@@ -699,36 +774,39 @@ os.makedirs('outputs/logs', exist_ok=True)
 # potentially the entire run, even though it's working the whole time, since
 # the buffer only flushes when it fills or the process exits. `stdbuf -oL -eL`
 # forces line buffering via LD_PRELOAD, which (unlike PYTHONUNBUFFERED) also
-# propagates to the python subprocesses scripts/10 itself spawns (extract_vq
+# propagates to the python subprocesses these scripts spawn (extract_vq
 # workers, the trainer), not just the outer bash script.
 result = subprocess.run(
     ['bash', '-c',
-     'set -o pipefail; stdbuf -oL -eL bash scripts/10_train_fish_khmer_base.sh 2>&1 '
+     f'set -o pipefail; stdbuf -oL -eL bash {_TRAIN_SCRIPT} 2>&1 '
      f'| tee {_log_path}'],
     env={**os.environ, 'PYTHONUNBUFFERED': '1'})
 
-# Cache whatever .npy VQ sidecars exist REGARDLESS of whether the run above
-# succeeded -- Step 1 (VQ extraction) can finish fine while Step 3 (training)
-# fails for an unrelated reason afterward (as just happened with the wandb
-# import crash), and that extraction is the expensive, hours-long part. Only
-# throwing this cache step behind a success check would mean any failure
-# AFTER Step 1 throws away Step 1's work too, defeating the whole point.
-# Best-effort: never let a caching hiccup here hide the real training error.
-from khmer_tts.collab.data_cache import pack_and_upload as _pack_and_upload
+if not IN_KAGGLE:
+    # Cache whatever .npy VQ sidecars exist REGARDLESS of whether the run
+    # above succeeded -- Step 1 (VQ extraction) can finish fine while Step 3
+    # (training) fails for an unrelated reason afterward (as happened once
+    # with a wandb import crash), and that extraction is the expensive,
+    # hours-long part. Only throwing this cache step behind a success check
+    # would mean any failure AFTER Step 1 throws away Step 1's work too,
+    # defeating the whole point. Best-effort: never let a caching hiccup here
+    # hide the real training error. (On Kaggle there is no raw audio or Step 1
+    # to cache -- Section 4 already required pre-built protos.)
+    from khmer_tts.collab.data_cache import pack_and_upload as _pack_and_upload
 
-# glob is run with cwd == WORKDIR (Section 2's os.chdir), so these paths are
-# already relative to WORKDIR -- exactly what pack_and_upload's `paths` wants.
-_npy_paths = [p for _d in ('data/fish/khmer_base', 'data/fish/khmer_base_val')
-              for p in glob.glob(os.path.join(_d, '**', '*.npy'), recursive=True)]
-if _npy_paths:
-    try:
-        _pack_and_upload(HF_DATA_REPO, VQ_CACHE_KEY, WORKDIR, paths=_npy_paths,
-                         token=os.environ.get('HF_TOKEN'), private=False)
-        print(f'Cached {len(_npy_paths)} VQ sidecar(s) to {HF_DATA_REPO} under {VQ_CACHE_KEY!r}.')
-    except Exception as _e:
-        print(f'!! failed to cache VQ sidecars (continuing): {_e}')
-else:
-    print('No .npy sidecars found to cache (Step 1 may not have run yet, or produced none).')
+    # glob is run with cwd == WORKDIR (Section 2's os.chdir), so these paths
+    # are already relative to WORKDIR -- exactly what pack_and_upload wants.
+    _npy_paths = [p for _d in ('data/fish/khmer_base', 'data/fish/khmer_base_val')
+                  for p in glob.glob(os.path.join(_d, '**', '*.npy'), recursive=True)]
+    if _npy_paths:
+        try:
+            _pack_and_upload(HF_DATA_REPO, VQ_CACHE_KEY, WORKDIR, paths=_npy_paths,
+                             token=os.environ.get('HF_TOKEN'), private=False)
+            print(f'Cached {len(_npy_paths)} VQ sidecar(s) to {HF_DATA_REPO} under {VQ_CACHE_KEY!r}.')
+        except Exception as _e:
+            print(f'!! failed to cache VQ sidecars (continuing): {_e}')
+    else:
+        print('No .npy sidecars found to cache (Step 1 may not have run yet, or produced none).')
 
 if result.returncode != 0:
     # Read the log file back and put its tail directly INTO the exception --
@@ -741,18 +819,23 @@ if result.returncode != 0:
         _tail = f'(no log file was created at {_log_path} -- the script ' \\
                 'failed before it produced any output at all)'
     raise RuntimeError(
-        f'10_train_fish_khmer_base.sh failed (exit code {result.returncode}).\\n\\n'
+        f'{_TRAIN_SCRIPT} failed (exit code {result.returncode}).\\n\\n'
         f'--- tail of {_log_path} ---\\n{_tail}'
     )
 
 # scripts/10's own Step 4 already merged the LoRA delta into
 # models/khmer_base/merged -- the only checkpoint anything downstream reads.
-# The packed protobuf shards and wav/lab audio are dead weight past this
-# point (rebuilt/re-downloaded next session); the .npy sidecars were already
-# cached to HF_DATA_REPO above, so it's safe to drop the local copies too.
-for _p in ('data/fish/khmer_base', 'data/fish/khmer_base_protos',
-           'data/fish/khmer_base_val', 'data/fish/khmer_base_val_protos',
-           'results/khmer_base/checkpoints'):
+# Everything else this session pulled/built is dead weight past this point
+# (re-downloaded/rebuilt next session): on Colab/local the wav/lab audio and
+# protobuf shards (the .npy sidecars were already cached above); on Kaggle
+# the pulled proto shards themselves.
+_cleanup_paths = ['results/khmer_base/checkpoints']
+if IN_KAGGLE:
+    _cleanup_paths += ['data/fish/khmer_shards', 'data/fish/khmer_val_protos']
+else:
+    _cleanup_paths += ['data/fish/khmer_base', 'data/fish/khmer_base_protos',
+                       'data/fish/khmer_base_val', 'data/fish/khmer_base_val_protos']
+for _p in _cleanup_paths:
     if os.path.isdir(_p):
         shutil.rmtree(_p)
 report_disk('after training cleanup')
