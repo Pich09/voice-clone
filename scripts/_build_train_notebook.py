@@ -57,7 +57,7 @@ cells.append(code("""\
 # stale already-open tab is behind the repo's copy (see khmer_tts_kaggle.ipynb
 # for why this matters -- opening a notebook from GitHub is a one-time
 # snapshot, re-running cells never re-fetches it).
-NOTEBOOK_REVISION = 2
+NOTEBOOK_REVISION = 3
 
 # --- Where your repo code comes from ---
 # Leave all three blank to run in-place (local machine, already inside the
@@ -194,7 +194,11 @@ elif VRAM_GB < 6:
 elif VRAM_GB < 12:
     EXTRACT_WORKERS, EXTRACT_BATCH_SIZE = 1 * N_GPUS, 8
 elif VRAM_GB < 20:
-    EXTRACT_WORKERS, EXTRACT_BATCH_SIZE = 2 * N_GPUS, 8
+    # 2 workers/GPU measured OOMing on an actual 14.56GB T4 (2 workers
+    # sharing one GPU landed at ~14GB combined, no headroom left for a
+    # batch's normal size fluctuation) -- 1 worker/GPU gives each the whole
+    # card instead, slower but reliable.
+    EXTRACT_WORKERS, EXTRACT_BATCH_SIZE = 1 * N_GPUS, 8
 else:
     EXTRACT_WORKERS, EXTRACT_BATCH_SIZE = 2 * N_GPUS, 16
 print(f'extract : {EXTRACT_WORKERS} worker(s) across {N_GPUS} GPU(s), '
