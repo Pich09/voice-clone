@@ -706,6 +706,30 @@ result = subprocess.run(
      'set -o pipefail; stdbuf -oL -eL bash scripts/10_train_fish_khmer_base.sh 2>&1 '
      f'| tee {_log_path}'],
     env={**os.environ, 'PYTHONUNBUFFERED': '1'})
+
+# Cache whatever .npy VQ sidecars exist REGARDLESS of whether the run above
+# succeeded -- Step 1 (VQ extraction) can finish fine while Step 3 (training)
+# fails for an unrelated reason afterward (as just happened with the wandb
+# import crash), and that extraction is the expensive, hours-long part. Only
+# throwing this cache step behind a success check would mean any failure
+# AFTER Step 1 throws away Step 1's work too, defeating the whole point.
+# Best-effort: never let a caching hiccup here hide the real training error.
+from khmer_tts.collab.data_cache import pack_and_upload as _pack_and_upload
+
+# glob is run with cwd == WORKDIR (Section 2's os.chdir), so these paths are
+# already relative to WORKDIR -- exactly what pack_and_upload's `paths` wants.
+_npy_paths = [p for _d in ('data/fish/khmer_base', 'data/fish/khmer_base_val')
+              for p in glob.glob(os.path.join(_d, '**', '*.npy'), recursive=True)]
+if _npy_paths:
+    try:
+        _pack_and_upload(HF_DATA_REPO, VQ_CACHE_KEY, WORKDIR, paths=_npy_paths,
+                         token=os.environ.get('HF_TOKEN'), private=False)
+        print(f'Cached {len(_npy_paths)} VQ sidecar(s) to {HF_DATA_REPO} under {VQ_CACHE_KEY!r}.')
+    except Exception as _e:
+        print(f'!! failed to cache VQ sidecars (continuing): {_e}')
+else:
+    print('No .npy sidecars found to cache (Step 1 may not have run yet, or produced none).')
+
 if result.returncode != 0:
     # Read the log file back and put its tail directly INTO the exception --
     # don't make the user go dig for it in a separate cell, since Colab's
@@ -723,27 +747,9 @@ if result.returncode != 0:
 
 # scripts/10's own Step 4 already merged the LoRA delta into
 # models/khmer_base/merged -- the only checkpoint anything downstream reads.
-# The packed protobuf shards are dead weight after this point (rebuilt in
-# minutes from the .npy sidecars next session). The wav/lab audio is also
-# dead weight (re-downloaded fresh from HF_DATA_REPO), but the .npy VQ
-# sidecars next to it are NOT -- they are the expensive, hours-long output of
-# Step 1, and unlike the audio they aren't already sitting safely in
-# HF_DATA_REPO, so upload them as their own small cache BEFORE the folders
-# that hold them get wiped. A future session's Section 4 overlay-restores
-# this so Step 1 can skip everything already done here instead of redoing it.
-from khmer_tts.collab.data_cache import pack_and_upload as _pack_and_upload
-
-# glob is run with cwd == WORKDIR (Section 2's os.chdir), so these paths are
-# already relative to WORKDIR -- exactly what pack_and_upload's `paths` wants.
-_npy_paths = [p for _d in ('data/fish/khmer_base', 'data/fish/khmer_base_val')
-              for p in glob.glob(os.path.join(_d, '**', '*.npy'), recursive=True)]
-if _npy_paths:
-    _pack_and_upload(HF_DATA_REPO, VQ_CACHE_KEY, WORKDIR, paths=_npy_paths,
-                     token=os.environ.get('HF_TOKEN'), private=False)
-    print(f'Cached {len(_npy_paths)} VQ sidecar(s) to {HF_DATA_REPO} under {VQ_CACHE_KEY!r}.')
-else:
-    print('No .npy sidecars found to cache (unexpected -- Step 1 should have written some).')
-
+# The packed protobuf shards and wav/lab audio are dead weight past this
+# point (rebuilt/re-downloaded next session); the .npy sidecars were already
+# cached to HF_DATA_REPO above, so it's safe to drop the local copies too.
 for _p in ('data/fish/khmer_base', 'data/fish/khmer_base_protos',
            'data/fish/khmer_base_val', 'data/fish/khmer_base_val_protos',
            'results/khmer_base/checkpoints'):
