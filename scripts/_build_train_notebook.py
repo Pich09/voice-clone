@@ -27,12 +27,19 @@ environment is auto-detected in Section 1.
 
 Designed to be run **across many separate sessions**: each run pulls the
 `latest/` checkpoint from your Hugging Face model repo (`Panhapich/Tuna-TTS`),
-trains `STAGE1_STEPS` more steps, then overwrites `latest/` with the result
-(and `best/` too, if this session's validation loss is the new best) —
-tagged in `metadata.json` with cumulative step count and validation loss.
-Only the latest and best checkpoints are ever kept (not full history), to
-minimize storage. Nothing is lost between sessions; just re-run this
-notebook (Kaggle/Colab quotas reset regularly) to keep going.
+trains more steps (`STAGE1_STEPS` on Colab/local, `KAGGLE_SHARD_STEPS` on
+Kaggle), then overwrites `latest/` with the result (and `best/` too, if this
+session's validation loss is the new best) — tagged in `metadata.json` with
+cumulative step count and validation loss. Only the latest and best
+checkpoints are ever kept (not full history), to minimize storage. Nothing is
+lost between sessions; just re-run this notebook (Kaggle/Colab quotas reset
+regularly) to keep going.
+
+**On Kaggle specifically** (20GB `/kaggle/working` cap, too small for the
+full dataset): trains on ONE VQ-ready data shard per session, then rotates to
+the next shard next session, freeing local disk in between. Requires
+`kaggle/preprocess_khmer_vq.ipynb` to have VQ-preprocessed at least one shard
+first — see that notebook.
 
 **Setup**
 1. Enable a GPU: Kaggle -> Settings > Accelerator > GPU T4 x2; Colab ->
@@ -85,7 +92,11 @@ HF_CKPT_REPO     = "Panhapich/Tuna-TTS"           # your repo -- created automat
 TRAINER_ID       = "panhapich"                    # just needs to be non-empty
 
 # --- Run size ---
-STAGE1_STEPS = 2000   # additional steps to train THIS session (target ~20000 total)
+STAGE1_STEPS = 2000   # additional steps to train THIS session (target ~20000 total) -- Colab/local
+# Kaggle trains one VQ-ready shard per session, then rotates to the next
+# shard (round-robin) and frees the local copy -- see Section 4/6. This is
+# that session's step count instead of STAGE1_STEPS.
+KAGGLE_SHARD_STEPS = 5000
 # =================================================================
 print('Config loaded.')
 """))
@@ -592,15 +603,18 @@ cells.append(code("""\
 # docstring. This notebook never rebuilds it.
 #
 # Kaggle's /kaggle/working is hard-capped at 20GB -- smaller than the full
-# ~22GB dataset -- so Kaggle instead requires kaggle/preprocess_khmer_vq.ipynb
-# to have ALREADY VQ-extracted and packed every data shard into protobufs
-# (much smaller than raw audio) via scripts/reshard_processed_data.py +
-# scripts/10a_extract_vq_and_build_protos.sh. This notebook then just pulls
-# those ready-made protobufs -- it never touches raw audio on Kaggle at all,
-# so Step 1 (VQ extraction) is skipped entirely on that platform.
+# ~22GB dataset -- so Kaggle instead trains on ONE VQ-ready shard per
+# session (round-robin, rotating to the next shard next session) rather than
+# the whole dataset at once. kaggle/preprocess_khmer_vq.ipynb VQ-extracts and
+# packs shards into protobufs (much smaller than raw audio) via
+# scripts/reshard_processed_data.py + scripts/10a_extract_vq_and_build_protos.sh;
+# this notebook just pulls whichever ONE shard is next AND already ready --
+# it never touches raw audio on Kaggle at all, so Step 1 (VQ extraction) is
+# skipped entirely on that platform.
 from khmer_tts.collab import (
-    download_and_restore, get_shard_count, get_ready_shards, is_val_ready,
+    download_and_restore, get_shard_count, is_val_ready,
     download_and_restore_ready_shard, download_and_restore_ready_val,
+    get_next_train_shard_index, advance_train_shard_cursor,
 )
 
 report_disk('before data download')
@@ -608,6 +622,7 @@ report_disk('before data download')
 PROTO_FILES = None       # set below on Kaggle; scripts/10 builds its own on Colab/local
 VAL_PROTO_FILES = None
 VQ_CACHE_KEY = None      # Colab/local only -- see Section 6
+SHARD_INDEX = None       # Kaggle only -- which shard THIS session trains on
 
 if IN_KAGGLE:
     _tok = os.environ.get('HF_TOKEN')
@@ -618,36 +633,34 @@ if IN_KAGGLE:
             'Run scripts/reshard_processed_data.py once (from a machine that already '
             'has the full processed data) to build shards.'
         )
-    _done = get_ready_shards(HF_DATA_REPO, DATA_CACHE_KEY, token=_tok)
-    if len(_done) < _n_shards:
-        _missing = sorted(set(range(_n_shards)) - _done)
+    SHARD_INDEX = get_next_train_shard_index(HF_DATA_REPO, DATA_CACHE_KEY, _n_shards, token=_tok)
+    if SHARD_INDEX is None:
         raise SystemExit(
-            f'Only {len(_done)}/{_n_shards} shards are VQ-preprocessed yet '
-            f'(missing: {_missing}). Run kaggle/preprocess_khmer_vq.ipynb '
-            '(Run All, possibly across several sessions -- it resumes where it '
-            'left off) until all shards are ready, THEN come back to this notebook.'
+            f'No shards are VQ-preprocessed yet at {HF_DATA_REPO}. Run '
+            'kaggle/preprocess_khmer_vq.ipynb first (Run All, possibly across '
+            'several sessions) until at least one shard is ready.'
         )
+    # Claim this shard immediately (not gated on this session succeeding) so a
+    # failed session still rotates forward next time instead of retrying it.
+    advance_train_shard_cursor(HF_DATA_REPO, DATA_CACHE_KEY, _n_shards, SHARD_INDEX, token=_tok)
     if not is_val_ready(HF_DATA_REPO, DATA_CACHE_KEY, token=_tok):
         raise SystemExit(
             f'Validation set is not VQ-preprocessed yet at {HF_DATA_REPO}. Run '
             'kaggle/preprocess_khmer_vq.ipynb first (it also processes the val set).'
         )
 
-    _proto_dirs = []
-    for _i in range(_n_shards):
-        _dir = f'data/fish/khmer_shards/shard{_i}_protos'
-        ok = download_and_restore_ready_shard(HF_DATA_REPO, DATA_CACHE_KEY, _i, _n_shards,
-                                              WORKDIR, token=_tok)
-        if not ok:
-            raise SystemExit(f'Shard {_i} was marked ready but its archive failed to download.')
-        _proto_dirs.append(_dir)
+    _proto_dir = f'data/fish/khmer_shards/shard{SHARD_INDEX}_protos'
+    ok = download_and_restore_ready_shard(HF_DATA_REPO, DATA_CACHE_KEY, SHARD_INDEX, _n_shards,
+                                          WORKDIR, token=_tok)
+    if not ok:
+        raise SystemExit(f'Shard {SHARD_INDEX} was marked ready but its archive failed to download.')
     ok = download_and_restore_ready_val(HF_DATA_REPO, DATA_CACHE_KEY, WORKDIR, token=_tok)
     if not ok:
         raise SystemExit('Validation protos were marked ready but the archive failed to download.')
 
-    PROTO_FILES = '[' + ','.join(_proto_dirs) + ']'
+    PROTO_FILES = f'[{_proto_dir}]'
     VAL_PROTO_FILES = '[data/fish/khmer_val_protos]'
-    print(f'Kaggle: all {_n_shards} shards + val are VQ-ready. PROTO_FILES={PROTO_FILES}')
+    print(f'Kaggle: training on shard {SHARD_INDEX}/{_n_shards} this session. PROTO_FILES={PROTO_FILES}')
 else:
     ok = download_and_restore(HF_DATA_REPO, DATA_CACHE_KEY, WORKDIR, token=os.environ.get('HF_TOKEN'))
     if not ok:
@@ -729,10 +742,14 @@ cells.append(code("""\
 import os, subprocess, glob
 
 _TRAIN_SCRIPT = 'scripts/10b_train_from_protos.sh' if IN_KAGGLE else 'scripts/10_train_fish_khmer_base.sh'
+# Kaggle trains one shard for KAGGLE_SHARD_STEPS steps, then rotates --
+# Colab/local trains the full dataset for STAGE1_STEPS. Section 7 reuses this
+# same value when tagging the published checkpoint.
+SESSION_STEPS = KAGGLE_SHARD_STEPS if IN_KAGGLE else STAGE1_STEPS
 # scripts/10 (and 10b) read these from the environment -- no editing the
 # script in place (in-place edits dirty the git tree and break Section 2's
 # `git pull` the next time this WORKDIR is reused).
-os.environ['STAGE1_MAX_STEPS'] = str(RESUME_STEP + STAGE1_STEPS)
+os.environ['STAGE1_MAX_STEPS'] = str(RESUME_STEP + SESSION_STEPS)
 os.environ.setdefault('TRAIN_ACCELERATOR', ACCELERATOR)
 if ACCELERATOR == 'gpu':
     os.environ.setdefault('TRAIN_BATCH_SIZE', str(TRAIN_BATCH_SIZE))
@@ -759,7 +776,7 @@ else:
 # trainer.max_steps stops at, not "how many steps this session runs" -- Lightning
 # resumes its own internal step counter from the checkpoint being fine-tuned
 # from is NOT tracked here (LoRA fine-tuning restarts the optimizer state each
-# session), so this notebook treats every session as training STAGE1_STEPS
+# session), so this notebook treats every session as training SESSION_STEPS
 # fresh steps on top of the resumed weights, and moves the cumulative counter
 # (used for step numbering / registry metadata) forward by that same amount.
 report_disk('before training')
@@ -853,7 +870,7 @@ file are ever stored -- no per-session history -- to keep the repo small.
 cells.append(code("""\
 from khmer_tts.collab import read_val_loss
 
-new_step = RESUME_STEP + STAGE1_STEPS
+new_step = RESUME_STEP + SESSION_STEPS
 vloss = read_val_loss('results/khmer_base') or read_val_loss('models/khmer_base')
 print('publishing: step', new_step, 'val_loss', vloss)
 

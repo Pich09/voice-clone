@@ -19,6 +19,7 @@ from .data_cache import (
     get_ready_shards, mark_shard_ready, all_shards_ready,
     pack_and_upload_ready_shard, download_and_restore_ready_shard,
     is_val_ready, pack_and_upload_ready_val, download_and_restore_ready_val,
+    get_next_train_shard_index, advance_train_shard_cursor,
 )
 
 __all__ = [
@@ -47,4 +48,6 @@ __all__ = [
     "is_val_ready",
     "pack_and_upload_ready_val",
     "download_and_restore_ready_val",
+    "get_next_train_shard_index",
+    "advance_train_shard_cursor",
 ]

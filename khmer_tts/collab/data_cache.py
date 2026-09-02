@@ -467,3 +467,60 @@ def download_and_restore_ready_val(repo_id: str, key: str, workdir: str,
         except OSError:
             pass
     return True
+
+
+# ---------------------------------------------------------------------------
+# Training-time shard rotation -- kaggle/train_khmer_base.ipynb trains on one
+# VQ-ready shard per session (not all combined), then rotates to the next
+# shard next session, freeing local disk between sessions. This cursor is
+# separate from the readiness tracking above: readiness says which shards
+# PREPROCESSING has finished; this says which one TRAINING should use next.
+# ---------------------------------------------------------------------------
+
+def _train_cursor_name(key: str) -> str:
+    return f"processed/khmer_base__{key}__train_cursor.json"
+
+
+def get_next_train_shard_index(repo_id: str, key: str, n_shards: int,
+                               token: Optional[str] = None) -> Optional[int]:
+    """The shard training should use this session: the next index after
+    wherever the cursor last left off that is ALREADY VQ-ready, wrapping
+    around, so training can proceed on whatever preprocessing has finished so
+    far rather than blocking on every shard being done. None if nothing is
+    ready yet at all."""
+    from huggingface_hub import hf_hub_download
+    try:
+        fp = hf_hub_download(repo_id, _train_cursor_name(key), repo_type="dataset",
+                             token=token, force_download=True)
+        with open(fp, encoding="utf-8") as f:
+            start = int(json.load(f).get("next_index", 0)) % n_shards
+    except Exception:
+        start = 0
+    done = get_ready_shards(repo_id, key, token=token)
+    if not done:
+        return None
+    for offset in range(n_shards):
+        idx = (start + offset) % n_shards
+        if idx in done:
+            return idx
+    return None
+
+
+def advance_train_shard_cursor(repo_id: str, key: str, n_shards: int, used_index: int,
+                               token: Optional[str] = None) -> None:
+    """Move the training cursor past `used_index` so next session picks up
+    the following shard. Called as soon as a shard is claimed for this
+    session (not gated on that session's success) so a failed session still
+    rotates forward instead of retrying the same shard forever."""
+    from huggingface_hub import upload_file
+    nxt = (used_index + 1) % n_shards
+    tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False,
+                                      encoding="utf-8")
+    try:
+        json.dump({"next_index": nxt}, tmp)
+        tmp.close()
+        upload_file(path_or_fileobj=tmp.name, path_in_repo=_train_cursor_name(key),
+                    repo_id=repo_id, repo_type="dataset", token=token,
+                    commit_message=f"train shard cursor -> {nxt}")
+    finally:
+        os.remove(tmp.name)
