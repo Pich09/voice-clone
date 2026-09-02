@@ -21,3 +21,9 @@ requests>=2.31
 # silero-vad (pip install silero-vad, or use torch.hub)
 # deepfilternet (pip install deepfilternet)
 # fish-speech (git clone into vendor/fish-speech and follow its own setup)
+
+# Optional — scripts/16_auto_eval.py (automated proxy scoring, no torch pin
+# since it must match the torch already installed for fish-speech/training)
+# transformers>=4.40      (ASR: facebook/mms-1b-all)
+# speechbrain>=1.0        (speaker embeddings: ECAPA-TDNN)
+# speechmos                (UTMOS naturalness predictor)
