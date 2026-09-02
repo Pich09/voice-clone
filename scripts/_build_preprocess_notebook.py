@@ -55,7 +55,7 @@ cells.append(md("## 0 - Configuration - edit this cell, then Run All"))
 
 cells.append(code("""\
 # ============================= CONFIG =============================
-NOTEBOOK_REVISION = 1  # v2 notebook, independent of the original
+NOTEBOOK_REVISION = 2  # v2 notebook, independent of the original
 
 GITHUB_URL   = "https://github.com/Pich09/voice-clone.git"
 DATASET_PATH = ""
@@ -74,21 +74,17 @@ cells.append(md("## 1 - Environment & GPU check"))
 cells.append(code("""\
 import subprocess, sys, os
 
-IN_COLAB = bool(os.environ.get('COLAB_RELEASE_TAG')) or os.path.exists('/var/colab/hostname')
-if IN_COLAB:
-    IN_KAGGLE = False
-else:
-    IN_KAGGLE = ('KAGGLE_KERNEL_RUN_TYPE' in os.environ
-                 or 'KAGGLE_URL_BASE' in os.environ
-                 or os.path.isdir('/kaggle/input'))
-IN_LOCAL = not IN_KAGGLE and not IN_COLAB
-ENV_NAME = 'Colab' if IN_COLAB else ('Kaggle' if IN_KAGGLE else 'Local')
-print('Environment:', ENV_NAME)
-if not IN_KAGGLE:
-    print('!! This notebook is only needed on Kaggle (20GB /kaggle/working cap). '
-          'On', ENV_NAME, 'train_khmer_base.ipynb handles the full dataset directly '
-          '-- proceeding anyway since you ran this, but you probably want that '
-          'notebook instead.')
+# This notebook only ever runs on Kaggle -- it exists purely to work around
+# Kaggle's 20GB /kaggle/working cap (see the intro cell). Hardcoded rather
+# than auto-detected: Kaggle's own kernel images are apparently built on
+# Google's Colab base image lineage, so COLAB_RELEASE_TAG (normally a
+# reliable Colab-only signal) can ALSO be set on a genuine Kaggle kernel --
+# measured directly on a Kaggle notebook, not a guess -- which made
+# environment auto-detection actively wrong here. No ambiguity to resolve
+# once this notebook is Kaggle-only by definition.
+IN_KAGGLE, IN_COLAB, IN_LOCAL = True, False, False
+ENV_NAME = 'Kaggle'
+print('Environment:', ENV_NAME, '(hardcoded -- this notebook is Kaggle-only)')
 
 import torch
 print('Python :', sys.version.split()[0])

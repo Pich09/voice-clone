@@ -57,7 +57,7 @@ cells.append(code("""\
 # stale already-open tab is behind the repo's copy (see khmer_tts_kaggle.ipynb
 # for why this matters -- opening a notebook from GitHub is a one-time
 # snapshot, re-running cells never re-fetches it).
-NOTEBOOK_REVISION = 1
+NOTEBOOK_REVISION = 2
 
 # --- Where your repo code comes from ---
 # Leave all three blank to run in-place (local machine, already inside the
@@ -106,17 +106,20 @@ cells.append(md("## 1 - Environment & GPU check"))
 cells.append(code("""\
 import subprocess, sys, os
 
-# Colab is checked FIRST via its own markers, treated as authoritative -- a
-# bare /kaggle directory is not a reliable Kaggle signal (kagglehub or a
-# stray mkdir can leave one on a Colab VM too). See khmer_tts_kaggle.ipynb's
-# Section 1 for the full reasoning; kept identical here.
-IN_COLAB = bool(os.environ.get('COLAB_RELEASE_TAG')) or os.path.exists('/var/colab/hostname')
-if IN_COLAB:
-    IN_KAGGLE = False
+# Kaggle checked FIRST, treated as authoritative: Kaggle's own kernel images
+# are apparently built on Google's Colab base image lineage, so
+# COLAB_RELEASE_TAG (and possibly /var/colab/hostname) can be set on a REAL
+# Kaggle kernel too -- measured directly on a Kaggle notebook, not a guess.
+# KAGGLE_KERNEL_RUN_TYPE/KAGGLE_URL_BASE are set by Kaggle's own kernel
+# launcher for the actual run, not inherited from a shared base image, so
+# they're the more trustworthy signal when both fire at once.
+IN_KAGGLE = ('KAGGLE_KERNEL_RUN_TYPE' in os.environ
+             or 'KAGGLE_URL_BASE' in os.environ
+             or os.path.isdir('/kaggle/input'))
+if IN_KAGGLE:
+    IN_COLAB = False
 else:
-    IN_KAGGLE = ('KAGGLE_KERNEL_RUN_TYPE' in os.environ
-                 or 'KAGGLE_URL_BASE' in os.environ
-                 or os.path.isdir('/kaggle/input'))
+    IN_COLAB = bool(os.environ.get('COLAB_RELEASE_TAG')) or os.path.exists('/var/colab/hostname')
 IN_LOCAL = not IN_KAGGLE and not IN_COLAB
 ENV_NAME = 'Colab' if IN_COLAB else ('Kaggle' if IN_KAGGLE else 'Local')
 print('Environment:', ENV_NAME)
