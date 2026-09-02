@@ -596,6 +596,21 @@ print('Preprocessed data restored:')
 for _p in ('data/fish/khmer_base', 'data/fish/khmer_base_val',
            'data/manifests/ddd_train.jsonl', 'data/manifests/ddd_valid.jsonl'):
     print(' ', _p, '- present' if os.path.exists(_p) else '- MISSING')
+
+# VQ token extraction (Section 6's Step 1) is the slowest part of a session
+# by far -- hours over the full dataset -- and is 100% deterministic given
+# the same audio + the same codec checkpoint, yet its .npy sidecar output was
+# being thrown away at the end of every session (see Section 6's cleanup) and
+# recomputed from scratch next time, because the archive above only ever
+# contained the wav/lab audio. Overlay a second, separate cache of just the
+# .npy sidecars a PRIOR session already computed, if one exists -- Step 1's
+# extract_vq.py already skips any file whose .npy sidecar exists, so this
+# alone turns a re-run into a near-instant no-op instead of hours of GPU time.
+# Safe to skip on a miss (nothing cached yet, e.g. the very first run ever).
+VQ_CACHE_KEY = DATA_CACHE_KEY + '_vq'
+_vq_hit = download_and_restore(HF_DATA_REPO, VQ_CACHE_KEY, WORKDIR, token=os.environ.get('HF_TOKEN'))
+print(f'VQ token cache ({VQ_CACHE_KEY}):', 'restored -- Step 1 will skip already-extracted files'
+      if _vq_hit else 'none yet -- Step 1 will extract from scratch this session')
 report_disk('after data download')
 """))
 
@@ -644,7 +659,7 @@ print('resuming from:', RESUME_CKPT or '(none yet -- starting from the base chec
 cells.append(md("## 6 - Train"))
 
 cells.append(code("""\
-import os, subprocess
+import os, subprocess, glob
 # scripts/10 reads these from the environment -- no editing the script in
 # place (in-place edits dirty the git tree and break Section 2's `git pull`
 # the next time this WORKDIR is reused).
@@ -708,9 +723,27 @@ if result.returncode != 0:
 
 # scripts/10's own Step 4 already merged the LoRA delta into
 # models/khmer_base/merged -- the only checkpoint anything downstream reads.
-# The source wav/lab files, VQ token sidecars, and packed protobuf shards are
-# dead weight after this point (re-downloaded fresh from HF_DATA_REPO next
-# session). results/khmer_base/csv/ is kept -- Section 7 reads val_loss from it.
+# The packed protobuf shards are dead weight after this point (rebuilt in
+# minutes from the .npy sidecars next session). The wav/lab audio is also
+# dead weight (re-downloaded fresh from HF_DATA_REPO), but the .npy VQ
+# sidecars next to it are NOT -- they are the expensive, hours-long output of
+# Step 1, and unlike the audio they aren't already sitting safely in
+# HF_DATA_REPO, so upload them as their own small cache BEFORE the folders
+# that hold them get wiped. A future session's Section 4 overlay-restores
+# this so Step 1 can skip everything already done here instead of redoing it.
+from khmer_tts.collab.data_cache import pack_and_upload as _pack_and_upload
+
+# glob is run with cwd == WORKDIR (Section 2's os.chdir), so these paths are
+# already relative to WORKDIR -- exactly what pack_and_upload's `paths` wants.
+_npy_paths = [p for _d in ('data/fish/khmer_base', 'data/fish/khmer_base_val')
+              for p in glob.glob(os.path.join(_d, '**', '*.npy'), recursive=True)]
+if _npy_paths:
+    _pack_and_upload(HF_DATA_REPO, VQ_CACHE_KEY, WORKDIR, paths=_npy_paths,
+                     token=os.environ.get('HF_TOKEN'), private=False)
+    print(f'Cached {len(_npy_paths)} VQ sidecar(s) to {HF_DATA_REPO} under {VQ_CACHE_KEY!r}.')
+else:
+    print('No .npy sidecars found to cache (unexpected -- Step 1 should have written some).')
+
 for _p in ('data/fish/khmer_base', 'data/fish/khmer_base_protos',
            'data/fish/khmer_base_val', 'data/fish/khmer_base_val_protos',
            'results/khmer_base/checkpoints'):
