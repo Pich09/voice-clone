@@ -96,6 +96,41 @@ if [ ! -d "$FISH_DIR" ]; then
   exit 1
 fi
 
+# extract_vq gives no progress output of its own worth relying on (its
+# per-worker tqdm bars interleave into a mess once piped to a log file), and
+# a 50k+ sample dataset at the conservative single-GPU batch/worker sizing
+# can legitimately take hours -- with nothing else printed in between, that
+# is indistinguishable from a hang and burns GPU-hours before anyone notices.
+# Run it in the background and poll .npy sidecar count every 60s instead, so
+# there is always a concrete "N/total done, ETA" line regardless of whatever
+# extract_vq itself is or isn't printing.
+run_extract_vq_with_heartbeat() {
+  local dir="$1"
+  local total
+  total=$(find "$dir" -name '*.wav' | wc -l)
+  echo "  extracting VQ tokens for $total file(s) in $dir ..."
+  python "$FISH_DIR/tools/vqgan/extract_vq.py" \
+    "$dir" \
+    --num-workers "$EXTRACT_WORKERS" \
+    --batch-size "$EXTRACT_BATCH_SIZE" \
+    --config-name "modded_dac_vq" \
+    --checkpoint-path "$CHECKPOINT_DIR/codec.pth" &
+  local pid=$!
+  local start
+  start=$(date +%s)
+  while kill -0 "$pid" 2>/dev/null; do
+    sleep 60
+    kill -0 "$pid" 2>/dev/null || break
+    local done_n elapsed eta_min
+    done_n=$(find "$dir" -name '*.npy' | wc -l)
+    elapsed=$(( $(date +%s) - start ))
+    eta_min=$(awk -v d="$done_n" -v t="$total" -v e="$elapsed" \
+      'BEGIN { if (d > 0) printf "%.1f", (t - d) * e / d / 60; else print "?" }')
+    echo "  [extract_vq heartbeat] ${done_n}/${total} sidecars written, ${elapsed}s elapsed, ~${eta_min} min remaining"
+  done
+  wait "$pid"
+}
+
 mkdir -p "$PROTO_DIR" "$OUTPUT_DIR"
 
 # Patch a real upstream bug: FishTokenizer passes the raw tokenizer.tiktoken
@@ -105,12 +140,7 @@ mkdir -p "$PROTO_DIR" "$OUTPUT_DIR"
 python scripts/patch_fish_speech_tokenizer.py --fish-dir "$FISH_DIR"
 
 echo "== Step 1: VQ token extraction =="
-python "$FISH_DIR/tools/vqgan/extract_vq.py" \
-  "$DATASET_DIR" \
-  --num-workers "$EXTRACT_WORKERS" \
-  --batch-size "$EXTRACT_BATCH_SIZE" \
-  --config-name "modded_dac_vq" \
-  --checkpoint-path "$CHECKPOINT_DIR/codec.pth"
+run_extract_vq_with_heartbeat "$DATASET_DIR"
 
 echo "== Step 2: Build protobuf dataset =="
 python "$FISH_DIR/tools/llama/build_dataset.py" \
@@ -137,12 +167,7 @@ VAL_PROTO_ARG="$PROTO_DIR"
 if [ -d "$VAL_DATASET_DIR" ] && [ -n "$(ls -A "$VAL_DATASET_DIR" 2>/dev/null)" ]; then
   echo "== Step 2b: VQ + protobuf for the held-out validation split =="
   mkdir -p "$VAL_PROTO_DIR"
-  python "$FISH_DIR/tools/vqgan/extract_vq.py" \
-    "$VAL_DATASET_DIR" \
-    --num-workers "$EXTRACT_WORKERS" \
-    --batch-size "$EXTRACT_BATCH_SIZE" \
-    --config-name "modded_dac_vq" \
-    --checkpoint-path "$CHECKPOINT_DIR/codec.pth"
+  run_extract_vq_with_heartbeat "$VAL_DATASET_DIR"
   python "$FISH_DIR/tools/llama/build_dataset.py" \
     --input "$VAL_DATASET_DIR" \
     --output "$VAL_PROTO_DIR" \
