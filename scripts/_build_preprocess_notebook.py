@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""One-off generator for kaggle/preprocess_khmer_vq.ipynb. Run manually after
+"""One-off generator for kaggle/preprocess_khmer_vq_v2.ipynb. Run manually after
 editing this file; not part of the pipeline. Keeps the notebook's JSON out of
 a hand-edited diff -- easier to review as Python source than as raw ipynb.
 
@@ -55,7 +55,7 @@ cells.append(md("## 0 - Configuration - edit this cell, then Run All"))
 
 cells.append(code("""\
 # ============================= CONFIG =============================
-NOTEBOOK_REVISION = 1
+NOTEBOOK_REVISION = 1  # v2 notebook, independent of the original
 
 GITHUB_URL   = "https://github.com/Pich09/voice-clone.git"
 DATASET_PATH = ""
@@ -208,7 +208,7 @@ print('Running commit:', _commit or '(not a git repo)')
 
 try:
     import re as _re
-    _nb_path = os.path.join(WORKDIR, 'kaggle', 'preprocess_khmer_vq.ipynb')
+    _nb_path = os.path.join(WORKDIR, 'kaggle', 'preprocess_khmer_vq_v2.ipynb')
     with open(_nb_path, encoding='utf-8') as _f:
         _m = _re.search(r'NOTEBOOK_REVISION\\s*=\\s*(\\d+)', _f.read())
     _repo_rev = int(_m.group(1)) if _m else None
@@ -220,7 +220,7 @@ if _repo_rev is not None and _repo_rev > NOTEBOOK_REVISION:
     raise RuntimeError(
         f'STALE NOTEBOOK: this tab is revision {NOTEBOOK_REVISION}, but the repo '
         f'is at revision {_repo_rev} (commit {_commit}).\\n\\n'
-        'Close this tab, re-open kaggle/preprocess_khmer_vq.ipynb fresh from GitHub, '
+        'Close this tab, re-open kaggle/preprocess_khmer_vq_v2.ipynb fresh from GitHub, '
         'and Run All again. Nothing on disk needs deleting.'
     )
 elif _repo_rev is not None:
@@ -241,7 +241,7 @@ for _patch_name in ('patch_fish_speech_tokenizer.py',
         if _patch_name == 'patch_fish_speech_tokenizer.py':
             raise RuntimeError(
                 f'{_patch_script} does not exist -- this tab is running stale code. '
-                'Close it, re-open kaggle/preprocess_khmer_vq.ipynb fresh from GitHub, '
+                'Close it, re-open kaggle/preprocess_khmer_vq_v2.ipynb fresh from GitHub, '
                 'and Run All again.'
             )
         continue
@@ -513,51 +513,52 @@ def run_10a(dataset_dir, proto_dir):
 done = get_ready_shards(HF_DATA_REPO, DATA_CACHE_KEY, token=_tok)
 print(f'{len(done)}/{n_shards} shard(s) already VQ-ready: {sorted(done)}')
 
+# reshard_processed_data.py packs each shard's members using their ORIGINAL
+# path (data/fish/khmer_base/<speaker>/<file>), not a per-shard path -- so
+# download_and_restore_shard/download_and_restore_val always extract into
+# these SAME two fixed directories no matter which shard/val was downloaded.
+# Must be cleared before each download (every shard lands in the same place)
+# and after each shard's processing (Kaggle's 20GB cap can't carry more than
+# one shard's raw audio + protos at a time alongside the checkpoint).
+RAW_SHARD_DIR = 'data/fish/khmer_base'
+RAW_VAL_DIR = 'data/fish/khmer_base_val'
+
 for i in range(n_shards):
     if i in done:
         print(f'-- shard {i}/{n_shards}: already ready, skipping --')
         continue
     print(f'-- shard {i}/{n_shards}: preprocessing --')
-    shard_dir = f'data/fish/khmer_shards/shard{i}'
     proto_dir = f'data/fish/khmer_shards/shard{i}_protos'
-    if os.path.isdir(shard_dir):
-        shutil.rmtree(shard_dir)
-    if os.path.isdir(proto_dir):
-        shutil.rmtree(proto_dir)
+    shutil.rmtree(RAW_SHARD_DIR, ignore_errors=True)
+    shutil.rmtree(proto_dir, ignore_errors=True)
     ok = download_and_restore_shard(HF_DATA_REPO, DATA_CACHE_KEY, i, n_shards,
                                     WORKDIR, token=_tok)
-    if not ok:
-        raise SystemExit(f'Failed to download shard {i}/{n_shards} raw audio.')
-    run_10a(shard_dir, proto_dir)
+    if not ok or not os.path.isdir(RAW_SHARD_DIR):
+        raise SystemExit(f'Failed to download shard {i}/{n_shards} raw audio '
+                         f'(expected it to land at {RAW_SHARD_DIR!r}).')
+    run_10a(RAW_SHARD_DIR, proto_dir)
     pack_and_upload_ready_shard(HF_DATA_REPO, DATA_CACHE_KEY, i, n_shards,
                                 WORKDIR, proto_dir, token=_tok, private=False)
     print(f'-- shard {i}/{n_shards}: uploaded and marked ready --')
-    # Free the disk before the next shard -- Kaggle's 20GB cap can't carry
-    # more than one shard's raw audio + protos at a time alongside the
-    # checkpoint and everything else installed.
-    shutil.rmtree(shard_dir, ignore_errors=True)
+    shutil.rmtree(RAW_SHARD_DIR, ignore_errors=True)
     shutil.rmtree(proto_dir, ignore_errors=True)
 
 if is_val_ready(HF_DATA_REPO, DATA_CACHE_KEY, token=_tok):
     print('Validation set already VQ-ready, skipping.')
 else:
     print('-- validation set: preprocessing --')
-    val_dir = 'data/fish/khmer_val'
     val_proto_dir = 'data/fish/khmer_val_protos'
-    if os.path.isdir(val_dir):
-        shutil.rmtree(val_dir)
-    if os.path.isdir(val_proto_dir):
-        shutil.rmtree(val_proto_dir)
+    shutil.rmtree(RAW_VAL_DIR, ignore_errors=True)
+    shutil.rmtree(val_proto_dir, ignore_errors=True)
     ok = download_and_restore_val(HF_DATA_REPO, DATA_CACHE_KEY, WORKDIR, token=_tok)
-    if not ok:
-        raise SystemExit('Failed to download the validation set raw audio.')
-    # download_and_restore_val extracts under its packed arcname
-    # (data/fish/khmer_base_val); point 10a at that directly.
-    run_10a('data/fish/khmer_base_val', val_proto_dir)
+    if not ok or not os.path.isdir(RAW_VAL_DIR):
+        raise SystemExit(f'Failed to download the validation set raw audio '
+                         f'(expected it to land at {RAW_VAL_DIR!r}).')
+    run_10a(RAW_VAL_DIR, val_proto_dir)
     pack_and_upload_ready_val(HF_DATA_REPO, DATA_CACHE_KEY, WORKDIR, val_proto_dir,
                               token=_tok, private=False)
     print('-- validation set: uploaded and marked ready --')
-    shutil.rmtree('data/fish/khmer_base_val', ignore_errors=True)
+    shutil.rmtree(RAW_VAL_DIR, ignore_errors=True)
     shutil.rmtree(val_proto_dir, ignore_errors=True)
 
 done = get_ready_shards(HF_DATA_REPO, DATA_CACHE_KEY, token=_tok)
@@ -581,7 +582,7 @@ notebook = {
     "nbformat_minor": 5,
 }
 
-out_path = os.path.join(os.path.dirname(__file__), "..", "kaggle", "preprocess_khmer_vq.ipynb")
+out_path = os.path.join(os.path.dirname(__file__), "..", "kaggle", "preprocess_khmer_vq_v2.ipynb")
 with open(out_path, "w", encoding="utf-8") as f:
     json.dump(notebook, f, ensure_ascii=False, indent=1)
 print("Wrote", os.path.abspath(out_path))
