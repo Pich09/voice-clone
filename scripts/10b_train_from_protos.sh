@@ -42,6 +42,11 @@ fi
 
 mkdir -p "$OUTPUT_DIR"
 python scripts/patch_fish_speech_tokenizer.py --fish-dir "$FISH_DIR"
+# Reentrant activation checkpointing fires DDP's gradient hooks twice per
+# parameter, which either deadlocks the allreduce or hard-fails with
+# "Expected to mark a variable ready only once" on multi-GPU. See the script's
+# header for the full story -- this is required for any DDP run.
+python scripts/patch_fish_speech_grad_checkpoint.py --fish-dir "$FISH_DIR"
 
 echo "== Step 3: LoRA fine-tune Khmer base model =="
 echo "train protos: $PROTO_FILES"
@@ -61,18 +66,13 @@ STRATEGY_OVERRIDE=()
 if [ "$TRAIN_ACCELERATOR" = "cpu" ]; then
   STRATEGY_OVERRIDE=("~trainer.strategy")
 else
-  # find_unused_parameters=true (tried first) fixes DDP hangs from PARTIALLY
-  # unused params, but DualARTransformer's fast_layers run multiple times
-  # per forward pass (once per codebook group) -- so the same LoRA param's
-  # backward hook fires more than once in one iteration, which DDP rejects
-  # by default ("Expected to mark a variable ready only once"), even with
-  # find_unused_parameters. static_graph=true is what PyTorch's own error
-  # message recommends for exactly this: it supersedes find_unused_parameters
-  # (handles unused params automatically too) and explicitly supports a
-  # parameter being touched multiple times per iteration, as long as which
-  # parameters participate doesn't change run to run -- true here since the
-  # forward pass is deterministic every step.
-  STRATEGY_OVERRIDE=("+trainer.strategy.static_graph=true")
+  # The actual double-hook-firing bug is fixed at its source by
+  # patch_fish_speech_grad_checkpoint.py above (non-reentrant checkpointing),
+  # not here. This is belt-and-braces: only the fast transformer's LoRA
+  # adapters are trainable, so if a batch ever leaves one of them untouched,
+  # default DDP would hang waiting for a gradient bucket that never arrives.
+  # Costs an extra graph traversal per step; cheap next to a silent deadlock.
+  STRATEGY_OVERRIDE=("+trainer.strategy.find_unused_parameters=true")
 fi
 python "$FISH_DIR/fish_speech/train.py" \
   --config-name text2semantic_finetune \

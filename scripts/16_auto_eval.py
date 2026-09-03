@@ -77,8 +77,40 @@ def _load_speaker_embedder():
 
 
 def _load_utmos():
-    from speechmos import utmos
-    return utmos
+    """Returns a callable(wav_path) -> float|None, or None if speechmos isn't
+    installed. speechmos has shipped this predictor under more than one entry
+    point name across versions and takes a waveform array (not a path), so
+    probe rather than assume -- a MOS proxy is the most optional of the
+    metrics here and must never take the whole eval down with it."""
+    try:
+        from speechmos import utmos
+    except ImportError:
+        print('speechmos not installed -- naturalness (UTMOS) will be skipped. '
+              'pip install speechmos to enable it.')
+        return None
+
+    fn = getattr(utmos, 'run', None) or getattr(utmos, 'predict', None)
+    if fn is None:
+        print('speechmos.utmos exposes neither run() nor predict() -- skipping '
+              'naturalness scoring.')
+        return None
+
+    def score(wav_path):
+        import librosa
+        wave, _ = librosa.load(wav_path, sr=16000, mono=True)
+        try:
+            out = fn(wave, sr=16000)
+        except TypeError:
+            out = fn(wave, 16000)
+        # Returns either a bare float or a dict like {'utmos': 3.4}.
+        if isinstance(out, dict):
+            for k in ('utmos', 'UTMOS', 'mos', 'score'):
+                if k in out:
+                    return float(out[k])
+            return float(next(iter(out.values())))
+        return float(out)
+
+    return score
 
 
 def _has_cuda() -> bool:
@@ -105,7 +137,6 @@ def _char_error_rate(reference: str, hypothesis: str) -> float:
 
 
 def _speaker_similarity(embedder, wav_a: str, wav_b: str) -> float:
-    import torch
     import torchaudio
     import torch.nn.functional as F
 
@@ -131,14 +162,15 @@ def _artifact_flags(wav_path: str) -> tuple[float, float]:
 
     clipping_ratio = float(np.mean(np.abs(audio) >= 0.99))
 
+    # Longest run of near-silence, vectorized -- a per-sample Python loop here
+    # is ~1M iterations for a 20s clip and dominates the whole eval.
     silent = np.abs(audio) < 1e-4
-    max_gap = 0
-    run = 0
-    for is_silent in silent:
-        run = run + 1 if is_silent else 0
-        max_gap = max(max_gap, run)
-    max_silence_s = max_gap / sr
-    return clipping_ratio, max_silence_s
+    if not silent.any():
+        return clipping_ratio, 0.0
+    # Run boundaries: where the silent/not-silent flag flips.
+    edges = np.flatnonzero(np.diff(np.concatenate(([0], silent.view(np.int8), [0]))))
+    max_gap = int((edges[1::2] - edges[::2]).max())
+    return clipping_ratio, max_gap / sr
 
 
 def _reference_wav_for(speaker: str, speaker_refs_dir: str) -> str | None:
@@ -202,15 +234,18 @@ def main():
 
         sim = _speaker_similarity(embedder, wav_path, ref_wav) if embedder else None
 
-        mos = utmos.predict(wav_path)  # naturalness, no reference needed
+        # naturalness, no reference needed -- None when speechmos is absent
+        mos = utmos(wav_path) if utmos else None
 
         clipping_ratio, max_silence_s = _artifact_flags(wav_path)
 
         unstable = cer >= CER_UNSTABLE
         artifacts_ok = clipping_ratio < CLIPPING_OK and max_silence_s < MAX_SILENCE_GAP_S
         pronunciation_ok = cer < CER_OK
+        # A metric that couldn't be computed doesn't fail the sample -- it just
+        # isn't evidence either way, and the report says so.
         similarity_ok = sim is None or sim >= SPEAKER_SIM_OK
-        naturalness_ok = mos >= UTMOS_OK
+        naturalness_ok = mos is None or mos >= UTMOS_OK
         overall_ok = pronunciation_ok and similarity_ok and naturalness_ok and artifacts_ok and not unstable
 
         rows.append({
@@ -219,14 +254,19 @@ def main():
             "asr_transcript": asr_text,
             "cer": round(cer, 4),
             "speaker_similarity": round(sim, 4) if sim is not None else "",
-            "utmos": round(float(mos), 3),
+            "utmos": round(mos, 3) if mos is not None else "",
             "clipping_ratio": round(clipping_ratio, 5),
             "max_silence_s": round(max_silence_s, 2),
             "long_text_unstable": unstable,
             "auto_pass": overall_ok,
         })
-        print(f"[{i}/{len(sentences)}] CER={cer:.3f} sim={sim} utmos={mos:.2f} "
+        _sim_s = f"{sim:.3f}" if sim is not None else "n/a"
+        _mos_s = f"{mos:.2f}" if mos is not None else "n/a"
+        print(f"[{i}/{len(sentences)}] CER={cer:.3f} sim={_sim_s} utmos={_mos_s} "
               f"pass={overall_ok}")
+
+    if not rows:
+        raise SystemExit(f"No sentences found in {args.sentences} -- nothing to score.")
 
     csv_path = os.path.join(args.out_dir, "AUTO_SCORECARD.csv")
     with open(csv_path, "w", newline="", encoding="utf-8") as f:
@@ -247,8 +287,10 @@ def main():
         f.write("| # | Sample | CER | Speaker sim | UTMOS | Clipping% | Max silence(s) | Unstable | Pass |\n")
         f.write("|---|---|---|---|---|---|---|---|---|\n")
         for i, r in enumerate(rows, 1):
-            f.write(f"| {i} | {r['sample']} | {r['cer']:.3f} | {r['speaker_similarity']} | "
-                     f"{r['utmos']:.2f} | {r['clipping_ratio']*100:.3f} | {r['max_silence_s']:.2f} | "
+            # utmos/speaker_similarity are "" when that metric was unavailable,
+            # so they can't take a numeric format spec here.
+            f.write(f"| {i} | {r['sample']} | {r['cer']:.3f} | {r['speaker_similarity'] or 'n/a'} | "
+                     f"{r['utmos'] or 'n/a'} | {r['clipping_ratio']*100:.3f} | {r['max_silence_s']:.2f} | "
                      f"{'yes' if r['long_text_unstable'] else ''} | "
                      f"{'PASS' if r['auto_pass'] else 'FAIL'} |\n")
         f.write("\nSamples that FAIL are worth a human listen first. Samples that PASS "

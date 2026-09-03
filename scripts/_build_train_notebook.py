@@ -57,7 +57,7 @@ cells.append(code("""\
 # stale already-open tab is behind the repo's copy (see khmer_tts_kaggle.ipynb
 # for why this matters -- opening a notebook from GitHub is a one-time
 # snapshot, re-running cells never re-fetches it).
-NOTEBOOK_REVISION = 3
+NOTEBOOK_REVISION = 4
 
 # --- Where your repo code comes from ---
 # Leave all three blank to run in-place (local machine, already inside the
@@ -647,9 +647,14 @@ if IN_KAGGLE:
             'kaggle/preprocess_khmer_vq.ipynb first (Run All, possibly across '
             'several sessions) until at least one shard is ready.'
         )
-    # Claim this shard immediately (not gated on this session succeeding) so a
-    # failed session still rotates forward next time instead of retrying it.
-    advance_train_shard_cursor(HF_DATA_REPO, DATA_CACHE_KEY, _n_shards, SHARD_INDEX, token=_tok)
+    # NOTE: the cursor is deliberately NOT advanced here. It used to be claimed
+    # up front so a broken shard couldn't trap the rotation in a retry loop, but
+    # in practice every early failure is a CODE bug that affects all shards
+    # equally (a Hydra override typo, a DDP deadlock, an OOM) -- and claiming up
+    # front meant each of those burned a shard that never saw a single training
+    # step, needing a manual cursor reset on the Hub to recover. Section 6
+    # advances it only after training actually succeeds.
+    _N_SHARDS = _n_shards
     if not is_val_ready(HF_DATA_REPO, DATA_CACHE_KEY, token=_tok):
         raise SystemExit(
             f'Validation set is not VQ-preprocessed yet at {HF_DATA_REPO}. Run '
@@ -846,6 +851,16 @@ if result.returncode != 0:
         f'{_TRAIN_SCRIPT} failed (exit code {result.returncode}).\\n\\n'
         f'--- tail of {_log_path} ---\\n{_tail}'
     )
+
+if IN_KAGGLE and SHARD_INDEX is not None:
+    # Training succeeded, so this shard is genuinely consumed -- only now does
+    # the rotation move on (see Section 4's note). A session that dies before
+    # here leaves the cursor alone and simply retries the same shard next time,
+    # instead of silently skipping a shard that never trained a single step.
+    advance_train_shard_cursor(HF_DATA_REPO, DATA_CACHE_KEY, _N_SHARDS, SHARD_INDEX,
+                               token=os.environ.get('HF_TOKEN'))
+    print(f'Shard {SHARD_INDEX} trained; rotation advanced to '
+          f'{(SHARD_INDEX + 1) % _N_SHARDS}.')
 
 # scripts/10's own Step 4 already merged the LoRA delta into
 # models/khmer_base/merged -- the only checkpoint anything downstream reads.
