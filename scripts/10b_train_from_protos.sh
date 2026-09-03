@@ -60,6 +60,15 @@ CKPT_EVERY=$(( STAGE1_MAX_STEPS < 1000 ? STAGE1_MAX_STEPS : 1000 ))
 STRATEGY_OVERRIDE=()
 if [ "$TRAIN_ACCELERATOR" = "cpu" ]; then
   STRATEGY_OVERRIDE=("~trainer.strategy")
+else
+  # DDPStrategy defaults to find_unused_parameters=false. With LoRA (only a
+  # small fraction of params require grad) + activation checkpointing, ranks
+  # can disagree on which parameters participated in backward, and NCCL's
+  # allreduce hangs forever waiting on a bucket that never arrives -- no
+  # error, no crash, just permanent silence on a multi-GPU session. This
+  # tells DDP to tolerate that instead of assuming every rank touches every
+  # parameter every step.
+  STRATEGY_OVERRIDE=("+trainer.strategy.find_unused_parameters=true")
 fi
 python "$FISH_DIR/fish_speech/train.py" \
   --config-name text2semantic_finetune \
