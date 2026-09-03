@@ -33,6 +33,19 @@ TRAIN_MAX_LENGTH="${TRAIN_MAX_LENGTH:-4096}"
 GRAD_ACCUM="${GRAD_ACCUM:-1}"
 TRAIN_ACCELERATOR="${TRAIN_ACCELERATOR:-gpu}"
 TRAIN_NUM_WORKERS="${TRAIN_NUM_WORKERS:-4}"
+# Which LoRA adapter set to train. r_8_alpha_16 has no target_modules, so it
+# falls through to lora.py's defaults (attention/mlp/embeddings/output), which
+# that file applies to the SLOW transformer as well as the fast one -- 28 slow
+# layers plus the 155k-token text embedding, i.e. the part that actually maps
+# Khmer text to speech. The old r_32_alpha_16_fast targets fast_* only, which
+# left the slow stack fully frozen (2.6M of 862M trainable) and taught the
+# model nothing about Khmer pronunciation. scripts/12 already used r_8_alpha_16.
+# Must match between training and the merge below or the merge silently
+# reconstructs the wrong module set.
+LORA_CONFIG="${LORA_CONFIG:-r_8_alpha_16}"
+# Empty -> keep the config's own precision (bf16-true). Turing cards (T4) have
+# no bf16 support, so the notebook sets this to 16-mixed there; see Section 1.
+TRAIN_PRECISION="${TRAIN_PRECISION:-}"
 
 if [ ! -d "$FISH_DIR" ]; then
   echo "ERROR: $FISH_DIR not found. Run:"
@@ -74,11 +87,16 @@ else
   # Costs an extra graph traversal per step; cheap next to a silent deadlock.
   STRATEGY_OVERRIDE=("+trainer.strategy.find_unused_parameters=true")
 fi
+PRECISION_OVERRIDE=()
+if [ -n "$TRAIN_PRECISION" ]; then
+  PRECISION_OVERRIDE=("trainer.precision=$TRAIN_PRECISION")
+fi
 python "$FISH_DIR/fish_speech/train.py" \
   --config-name text2semantic_finetune \
   "${STRATEGY_OVERRIDE[@]}" \
+  "${PRECISION_OVERRIDE[@]}" \
   project=khmer_base \
-  +lora@model.model.lora_config=r_32_alpha_16_fast \
+  +lora@model.model.lora_config="$LORA_CONFIG" \
   train_dataset.proto_files="$PROTO_FILES" \
   val_dataset.proto_files="$VAL_PROTO_FILES" \
   pretrained_ckpt_path="$PRETRAINED_CKPT" \
@@ -107,7 +125,7 @@ if [ -z "$LATEST_CKPT" ]; then
 fi
 echo "Merging $LATEST_CKPT"
 python "$FISH_DIR/tools/llama/merge_lora.py" \
-  --lora-config r_32_alpha_16_fast \
+  --lora-config "$LORA_CONFIG" \
   --base-weight "$PRETRAINED_CKPT" \
   --lora-weight "$LATEST_CKPT" \
   --output "$OUTPUT_DIR/merged"

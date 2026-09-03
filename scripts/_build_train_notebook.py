@@ -57,7 +57,7 @@ cells.append(code("""\
 # stale already-open tab is behind the repo's copy (see khmer_tts_kaggle.ipynb
 # for why this matters -- opening a notebook from GitHub is a one-time
 # snapshot, re-running cells never re-fetches it).
-NOTEBOOK_REVISION = 4
+NOTEBOOK_REVISION = 5
 
 # --- Where your repo code comes from ---
 # Leave all three blank to run in-place (local machine, already inside the
@@ -169,6 +169,22 @@ elif VRAM_GB < 20:
 else:
     TRAIN_BATCH_SIZE, TRAIN_MAX_LENGTH = 4, 4096
 GRAD_ACCUM = max(1, 4 // TRAIN_BATCH_SIZE)
+
+# fish-speech's config asks for bf16-true, but bf16 needs compute capability
+# 8.0+ (Ampere). Kaggle's T4 is 7.5 (Turing): bf16 there has no tensor-core
+# path, so it falls back to a much slower route while fp16 -- which Turing
+# accelerates natively -- is sitting right there. Empty string means "don't
+# override", i.e. keep bf16-true on Ampere and newer.
+TRAIN_PRECISION = ''
+if ACCELERATOR == 'gpu' and torch.cuda.is_available():
+    _cap = torch.cuda.get_device_capability(0)
+    if _cap[0] < 8:
+        TRAIN_PRECISION = '16-mixed'
+        print(f'GPU compute capability {_cap[0]}.{_cap[1]} has no bf16 support '
+              f'-> trainer.precision=16-mixed (fp16 tensor cores)')
+    else:
+        print(f'GPU compute capability {_cap[0]}.{_cap[1]} supports bf16 '
+              f'-> keeping the config default (bf16-true)')
 
 # extract_vq has its own memory profile (codec + padded raw waveforms) --
 # see khmer_tts_kaggle.ipynb Section 1 for measured sizing.
@@ -768,6 +784,8 @@ if ACCELERATOR == 'gpu':
     os.environ.setdefault('TRAIN_MAX_LENGTH', str(TRAIN_MAX_LENGTH))
     os.environ.setdefault('GRAD_ACCUM', str(GRAD_ACCUM))
 os.environ.setdefault('TRAIN_NUM_WORKERS', str(TRAIN_NUM_WORKERS))
+if TRAIN_PRECISION:
+    os.environ.setdefault('TRAIN_PRECISION', TRAIN_PRECISION)
 if IN_KAGGLE:
     # 10b never runs extract_vq (Section 4 already required VQ-ready protos),
     # so these knobs don't apply -- it reads the shard protos directly.
