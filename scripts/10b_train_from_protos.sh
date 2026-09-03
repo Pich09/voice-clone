@@ -76,10 +76,10 @@ python "$FISH_DIR/fish_speech/train.py" \
   trainer.accelerator="$TRAIN_ACCELERATOR" \
   trainer.max_steps="$STAGE1_MAX_STEPS" \
   trainer.val_check_interval=1000 \
-  +trainer.log_every_n_steps=100 \
+  +trainer.log_every_n_steps=20 \
   callbacks.model_checkpoint.every_n_train_steps="$CKPT_EVERY" \
   callbacks.model_checkpoint.save_top_k=1 \
-  +callbacks.progress_bar.refresh_rate=100 \
+  +callbacks.progress_bar.refresh_rate=20 \
   +logger.csv._target_=lightning.pytorch.loggers.csv_logs.CSVLogger \
   +logger.csv.save_dir="results/khmer_base" \
   +logger.csv.name=csv \
