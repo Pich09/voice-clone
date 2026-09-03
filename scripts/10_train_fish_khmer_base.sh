@@ -234,14 +234,18 @@ STRATEGY_OVERRIDE=()
 if [ "$TRAIN_ACCELERATOR" = "cpu" ]; then
   STRATEGY_OVERRIDE=("~trainer.strategy")
 else
-  # DDPStrategy defaults to find_unused_parameters=false. With LoRA (only a
-  # small fraction of params require grad) + activation checkpointing, ranks
-  # can disagree on which parameters participated in backward, and NCCL's
-  # allreduce hangs forever waiting on a bucket that never arrives -- no
-  # error, no crash, just permanent silence on a multi-GPU session. This
-  # tells DDP to tolerate that instead of assuming every rank touches every
-  # parameter every step.
-  STRATEGY_OVERRIDE=("+trainer.strategy.find_unused_parameters=true")
+  # find_unused_parameters=true (tried first) fixes DDP hangs from PARTIALLY
+  # unused params, but DualARTransformer's fast_layers run multiple times
+  # per forward pass (once per codebook group) -- so the same LoRA param's
+  # backward hook fires more than once in one iteration, which DDP rejects
+  # by default ("Expected to mark a variable ready only once"), even with
+  # find_unused_parameters. static_graph=true is what PyTorch's own error
+  # message recommends for exactly this: it supersedes find_unused_parameters
+  # (handles unused params automatically too) and explicitly supports a
+  # parameter being touched multiple times per iteration, as long as which
+  # parameters participate doesn't change run to run -- true here since the
+  # forward pass is deterministic every step.
+  STRATEGY_OVERRIDE=("+trainer.strategy.static_graph=true")
 fi
 python "$FISH_DIR/fish_speech/train.py" \
   --config-name text2semantic_finetune \
