@@ -57,7 +57,7 @@ cells.append(code("""\
 # stale already-open tab is behind the repo's copy (see khmer_tts_kaggle.ipynb
 # for why this matters -- opening a notebook from GitHub is a one-time
 # snapshot, re-running cells never re-fetches it).
-NOTEBOOK_REVISION = 5
+NOTEBOOK_REVISION = 6
 
 # --- Where your repo code comes from ---
 # Leave all three blank to run in-place (local machine, already inside the
@@ -96,7 +96,7 @@ STAGE1_STEPS = 2000   # additional steps to train THIS session (target ~20000 to
 # Kaggle trains one VQ-ready shard per session, then rotates to the next
 # shard (round-robin) and frees the local copy -- see Section 4/6. This is
 # that session's step count instead of STAGE1_STEPS.
-KAGGLE_SHARD_STEPS = 5000
+KAGGLE_SHARD_STEPS = 500
 # =================================================================
 print('Config loaded.')
 """))
