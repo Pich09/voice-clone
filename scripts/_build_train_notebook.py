@@ -57,7 +57,7 @@ cells.append(code("""\
 # stale already-open tab is behind the repo's copy (see khmer_tts_kaggle.ipynb
 # for why this matters -- opening a notebook from GitHub is a one-time
 # snapshot, re-running cells never re-fetches it).
-NOTEBOOK_REVISION = 6
+NOTEBOOK_REVISION = 7
 
 # --- Where your repo code comes from ---
 # Leave all three blank to run in-place (local machine, already inside the
@@ -97,6 +97,16 @@ STAGE1_STEPS = 2000   # additional steps to train THIS session (target ~20000 to
 # shard (round-robin) and frees the local copy -- see Section 4/6. This is
 # that session's step count instead of STAGE1_STEPS.
 KAGGLE_SHARD_STEPS = 500
+
+# Section 8 (sanity check) loads the model back onto the GPU a second time,
+# after training, just to synthesize eval samples -- it is NOT required for
+# training to continue next session (the checkpoint is already safely
+# published by Section 7 before this runs). If the kernel is dying/OOMing
+# after every checkpoint upload, set this to False: it removes that second
+# GPU load from the critical path entirely, so a crash there can no longer
+# threaten anything already saved. Re-enable once the OOM is diagnosed, or
+# run eval separately/offline against a pulled checkpoint.
+RUN_SANITY_CHECK = False
 # =================================================================
 print('Config loaded.')
 """))
@@ -931,23 +941,33 @@ cells.append(md("""\
 Synthesizes the 10 Khmer test sentences with the checkpoint just trained,
 plays the first few inline, and uploads the batch to your HF repo under
 `eval/step_XXXXXXX/` so you can compare sessions over time.
+
+Gated behind `RUN_SANITY_CHECK` (Section 0): this loads the model onto the
+GPU a **second time** after training, purely for convenience -- your
+checkpoint is already safely published by Section 7 above regardless of
+whether this cell runs or crashes. If your kernel has been dying/OOMing
+right after the checkpoint upload, this is the top suspect; leave
+`RUN_SANITY_CHECK = False` until that's diagnosed.
 """))
 
 cells.append(code("""\
-_tag = f'step_{new_step:07d}'
-_eval_dir = f'outputs/eval/khmer_base_{_tag}'
-run_step(['scripts/13_generate_eval_samples.py', '--model_dir', 'models/khmer_base/merged',
-          '--speaker', 'default', '--sentences', 'eval/test_sentences_km.txt',
-          '--out_dir', _eval_dir])
+if RUN_SANITY_CHECK:
+    _tag = f'step_{new_step:07d}'
+    _eval_dir = f'outputs/eval/khmer_base_{_tag}'
+    run_step(['scripts/13_generate_eval_samples.py', '--model_dir', 'models/khmer_base/merged',
+              '--speaker', 'default', '--sentences', 'eval/test_sentences_km.txt',
+              '--out_dir', _eval_dir])
 
-import IPython.display as ipd, glob
-for w in sorted(glob.glob(_eval_dir + '/*.wav'))[:3]:
-    print(w); ipd.display(ipd.Audio(w))
+    import IPython.display as ipd, glob
+    for w in sorted(glob.glob(_eval_dir + '/*.wav'))[:3]:
+        print(w); ipd.display(ipd.Audio(w))
 
-store.api.upload_folder(repo_id=HF_CKPT_REPO, repo_type='model',
-                        folder_path=_eval_dir, path_in_repo=f'eval/{_tag}',
-                        commit_message=f'eval samples {_tag}')
-print(f'Uploaded eval samples to https://huggingface.co/{HF_CKPT_REPO}/tree/main/eval/{_tag}')
+    store.api.upload_folder(repo_id=HF_CKPT_REPO, repo_type='model',
+                            folder_path=_eval_dir, path_in_repo=f'eval/{_tag}',
+                            commit_message=f'eval samples {_tag}')
+    print(f'Uploaded eval samples to https://huggingface.co/{HF_CKPT_REPO}/tree/main/eval/{_tag}')
+else:
+    print('RUN_SANITY_CHECK is False -- skipping (checkpoint is already published above).')
 """))
 
 notebook = {
